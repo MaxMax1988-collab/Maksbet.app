@@ -313,33 +313,32 @@ with tab1:
 
 with tab2:
     st.subheader("🎯 Moduł Player Props (Indywidualne statystyki zawodników)")
-    st.caption("Rynki zawodników powiązane z nadchodzącymi meczami w bazie.")
+    st.caption(f"Rynki zawodników dopasowane do wybranej dyscypliny: {discipline}")
     
     if not raw_matches:
         st.info("Brak aktywnych meczów do powiązania statystyk zawodników.")
     else:
         sample_props = []
         for idx, match in enumerate(raw_matches[:3]):
-            if "NBA" in discipline or idx % 2 == 0:
-                sample_props.append({
-                    "match": f"{match['home']} vs {match['away']}",
-                    "time": match.get('commence_time', 'Dzisiaj'),
-                    "player": f"Lider zespołu ({match['home']})",
-                    "prop": "Powyżej 24.5 Punktów",
-                    "odds": round(np.random.uniform(1.85, 2.15), 2),
-                    "ai_prob": "57.5%",
-                    "edge": "+14.2%"
-                })
+            if "NBA" in discipline:
+                prop_text = "Powyżej 24.5 Punktów"
+                odds_val = round(np.random.uniform(1.85, 2.15), 2)
+            elif "NHL" in discipline:
+                prop_text = "Powyżej 1.5 Punktu (Gole + Asysty)"
+                odds_val = round(np.random.uniform(1.95, 2.30), 2)
             else:
-                sample_props.append({
-                    "match": f"{match['home']} vs {match['away']}",
-                    "time": match.get('commence_time', 'Dzisiaj'),
-                    "player": f"Główny strzelec ({match['away']})",
-                    "prop": "Powyżej 1.5 Punktu / Bramki",
-                    "odds": round(np.random.uniform(1.95, 2.30), 2),
-                    "ai_prob": "53.0%",
-                    "edge": "+16.8%"
-                })
+                prop_text = "Powyżej 21.5 Gemów w meczu"
+                odds_val = round(np.random.uniform(1.80, 2.10), 2)
+                
+            sample_props.append({
+                "match": f"{match['home']} vs {match['away']}",
+                "time": match.get('commence_time', 'Dzisiaj'),
+                "player": f"Kluczowy zawodnik ({match['home'] if idx%2==0 else match['away']})",
+                "prop": prop_text,
+                "odds": odds_val,
+                "ai_prob": f"{round(np.random.uniform(52.0, 61.0), 1)}%",
+                "edge": f"+{round(np.random.uniform(10.0, 18.0), 1)}%"
+            })
         
         for p in sample_props:
             st.markdown(f"""
@@ -420,4 +419,4 @@ with tab4:
             tooltip=['date', 'cumulative_profit']
         ).properties(height=350)
         st.altair_chart(chart, use_container_width=True)
-                    
+                        
