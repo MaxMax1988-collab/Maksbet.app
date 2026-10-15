@@ -487,4 +487,22 @@ with tab2:
                                                 round((range_summary['Zysk'] / range_summary['Postawiono']) * 100, 2), 0.0)
             st.dataframe(range_summary, use_container_width=True)
         else:
-            st.info("Heatmapa kursowa uzupełni się automatyczn
+            st.info("Heatmapa kursowa uzupełni się automatycznie po zakończeniu i rozliczeniu pierwszych meczów przez API.")
+
+        st.markdown("---")
+        st.dataframe(df_bets, use_container_width=True)
+
+with tab3:
+    st.subheader("📈 Krzywa Wzrostu Kapitału")
+    df_bets = pd.read_sql("SELECT date, profit FROM bets WHERE status != 'Oczekujący'", db_conn)
+    
+    if df_bets.empty or 'profit' not in df_bets.columns or len(df_bets) == 0:
+        st.info("Wykres wygeneruje się automatycznie po rozegraniu i rozliczeniu pierwszych meczów w tle przez system.")
+    else:
+        df_bets['cumulative_profit'] = df_bets['profit'].cumsum() + bankroll
+        chart = alt.Chart(df_bets).mark_line(strokeWidth=3, color='#34d399').encode(
+            x='date:T',
+            y='cumulative_profit:Q',
+            tooltip=['date', 'cumulative_profit']
+        ).properties(height=350)
+        st.altair_chart(chart, use_container_width=True)
