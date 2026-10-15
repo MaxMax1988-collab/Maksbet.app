@@ -17,33 +17,64 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- CYBERPUNKOWY / TERMINALOWY DESIGN CSS ---
+# --- NOWOCZESNY DESIGN CSS (W Stylu Premium Mobile UI) ---
 st.markdown("""
     <style>
     .main {
-        background-color: #0e1117;
+        background-color: #0b0f19;
+        color: #f3f4f6;
     }
+    /* Pasek boczny w stylu ciemnego glassmorphismu */
+    [data-testid="stSidebar"] {
+        background-color: #111827;
+        border-right: 1px solid #1f2937;
+    }
+    /* Kafelki metryk */
     .stMetric {
-        background-color: #161b22;
-        padding: 10px;
-        border-radius: 8px;
-        border: 1px solid #30363d;
-    }
-    .value-card {
-        background-color: #161b22;
-        border-left: 5px solid #238636;
+        background: linear-gradient(135deg, #1f2937 0%, #111827 100%);
         padding: 15px;
-        border-radius: 6px;
-        margin-bottom: 10px;
+        border-radius: 14px;
+        border: 1px solid #374151;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
     }
+    /* Karta wartości (Value Card) w nowoczesnym stylu */
+    .value-card {
+        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+        border-left: 6px solid #10b981;
+        padding: 20px;
+        border-radius: 12px;
+        margin-bottom: 15px;
+        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
+        border-top: 1px solid #334155;
+        border-right: 1px solid #334155;
+        border-bottom: 1px solid #334155;
+    }
+    /* Badge Steam Move */
     .steam-badge {
-        background-color: #d1242f;
+        background: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%);
         color: white;
-        padding: 2px 8px;
-        border-radius: 4px;
+        padding: 4px 10px;
+        border-radius: 6px;
         font-size: 11px;
-        font-weight: bold;
+        font-weight: 700;
         float: right;
+        letter-spacing: 0.5px;
+        box-shadow: 0 2px 4px rgba(239, 68, 68, 0.4);
+    }
+    /* Stylowanie przycisków */
+    .stButton>button {
+        background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+        color: white;
+        border-radius: 8px;
+        border: none;
+        padding: 8px 16px;
+        font-weight: 600;
+        box-shadow: 0 4px 6px rgba(59, 130, 246, 0.3);
+    }
+    .stButton>button:hover {
+        background: linear-gradient(135deg, #2563eb 100%, #1e40af 100%);
+        border: none;
+        color: white;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -71,7 +102,6 @@ def init_db():
             best_pick TEXT
         )
     ''')
-    # Sprawdzanie i ewentualne dodawanie nowych kolumn dla starszych wersji bazy
     for col_def in [
         ("profit", "REAL DEFAULT 0.0"),
         ("home_team", "TEXT"),
@@ -82,7 +112,6 @@ def init_db():
             cursor.execute(f"ALTER TABLE bets ADD COLUMN {col_def[0]} {col_def[1]}")
         except sqlite3.OperationalError:
             pass
-            
     conn.commit()
     return conn
 
@@ -176,7 +205,6 @@ class AutonomousDataFetcher:
         if not pending_bets:
             return
 
-        # Mapowanie dyscyplin na klucze API wyników
         sport_key_map = {
             "🏀 NBA Koszykówka": "basketball_nba",
             "🏒 NHL Hokej": "icehockey_nhl",
@@ -196,7 +224,6 @@ class AutonomousDataFetcher:
                         if match.get('id') == bet_id and match.get('completed'):
                             scores = match.get('scores', [])
                             if scores:
-                                # Ustalenie zwycięzcy na podstawie wyników punktowych
                                 winner = None
                                 max_score = -1
                                 for s in scores:
@@ -246,7 +273,7 @@ def init_self_learning_xgboost():
 model = init_self_learning_xgboost()
 fetcher = AutonomousDataFetcher(ODDS_API_KEY)
 
-# Uruchomienie automatycznego rozliczania zakładów w tle przy każdym załadowaniu aplikacji
+# Uruchomienie automatycznego rozliczania w tle
 fetcher.auto_settle_bets(db_conn)
 
 sport_weights = {
@@ -256,16 +283,18 @@ sport_weights = {
 }
 
 # --- PANEL BOCZNY ---
-st.title("🎯 Maksbet.app")
 with st.sidebar:
-    st.header("⚙️ Konfiguracja Quant Engine")
+    st.markdown("### 🎯 Maksbet.app")
+    st.caption("Autonomous Quant Engine")
+    st.markdown("---")
+    
     discipline = st.selectbox("Dyscyplina", ["🏀 NBA Koszykówka", "🏒 NHL Hokej", "🎾 Tenis (WTA/ATP)"])
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
     min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=1.0, max_value=15.0, value=5.0, step=0.5) / 100.0
     
     st.markdown("---")
-    st.subheader(f"🧠 Automatyczne Wagi AI: {discipline}")
+    st.markdown(f"**🧠 Wagi AI: {discipline}**")
     for feature_name, weight_val in sport_weights[discipline].items():
         if weight_val > 0:
             st.text(f"{feature_name}: {int(weight_val*100)}%")
@@ -357,11 +386,12 @@ for m in raw_matches:
 analyzed_matches.sort(key=lambda x: x['edge'], reverse=True)
 
 # --- INTERFEJS GŁÓWNY (ZAKŁADKI) ---
+st.markdown("## ⚡ Dashboard Kwantowy")
 tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value", "📁 Rejestr, ROI & Heatmapa", "📈 Krzywa Kapitału"])
 
 with tab1:
-    st.subheader(f"🤖 Terminal Kwantowy: {discipline}")
-    st.caption(f"Filtrowanie aktywne: Minimalny Edge >= {int(min_edge_slider*100)}% + Detekcja Steam Move (Auto-Settlement Active)")
+    st.subheader(f"Terminal Analityczny: {discipline}")
+    st.caption(f"Filtrowanie aktywne: Minimalny Edge >= {int(min_edge_slider*100)}% + Auto-Settlement Active")
     
     if not analyzed_matches:
         st.warning("Brak spotkań spełniających kryteria przewagi rynkowej w najbliższych 36h.")
@@ -375,9 +405,9 @@ with tab1:
                 st.markdown(f"""
                     <div class="value-card">
                         <h3>{m['home']} vs {m['away']} {steam_html}</h3>
-                        <p style="color: #8b949e; font-size: 12px;">Start: {m.get('commence_time', 'Najbliższe godziny')}</p>
-                        <p>🎯 <b>Typ AI:</b> <span style="color: #58a6ff;">{m['best_pick']}</span></p>
-                        <p>🔥 <b>Value:</b> <span style="color: #3fb950;">+{edge_pct}%</span> | 💰 <b>Stawka:</b> {m['stake']} PLN</p>
+                        <p style="color: #94a3b8; font-size: 12px;">Start: {m.get('commence_time', 'Najbliższe godziny')}</p>
+                        <p>🎯 <b>Typ AI:</b> <span style="color: #60a5fa;">{m['best_pick']}</span></p>
+                        <p>🔥 <b>Value:</b> <span style="color: #34d399;">+{edge_pct}%</span> | 💰 <b>Stawka:</b> {m['stake']} PLN</p>
                     </div>
                 """, unsafe_allow_html=True)
                 
@@ -457,23 +487,4 @@ with tab2:
                                                 round((range_summary['Zysk'] / range_summary['Postawiono']) * 100, 2), 0.0)
             st.dataframe(range_summary, use_container_width=True)
         else:
-            st.info("Heatmapa kursowa uzupełni się automatycznie po zakończeniu i rozliczeniu pierwszych meczów przez API.")
-
-        st.markdown("---")
-        st.dataframe(df_bets, use_container_width=True)
-
-with tab3:
-    st.subheader("📈 Krzywa Wzrostu Kapitału")
-    df_bets = pd.read_sql("SELECT date, profit FROM bets WHERE status != 'Oczekujący'", db_conn)
-    
-    if df_bets.empty or 'profit' not in df_bets.columns or len(df_bets) == 0:
-        st.info("Wykres wygeneruje się automatycznie po rozegraniu i rozliczeniu pierwszych meczów w tle przez system.")
-    else:
-        df_bets['cumulative_profit'] = df_bets['profit'].cumsum() + bankroll
-        chart = alt.Chart(df_bets).mark_line(strokeWidth=3, color='#3fb950').encode(
-            x='date:T',
-            y='cumulative_profit:Q',
-            tooltip=['date', 'cumulative_profit']
-        ).properties(height=350)
-        st.altair_chart(chart, use_container_width=True)
-                                   
+            st.info("Heatmapa kursowa uzupełni się automatyczn
