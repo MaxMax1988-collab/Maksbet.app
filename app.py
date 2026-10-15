@@ -198,30 +198,50 @@ for m in raw_matches:
         m['market_movement']
     ]], columns=['form_diff', 'home_away_adv', 'fatigue_diff', 'off_diff', 'def_diff', 'elo_diff', 'h2h', 'market_movement'])
     
-    ai_prob = float(model.predict_proba(features)[0][1])
-    odds = m['odds_home']
-    edge = (ai_prob * odds) - 1
+    # Prawdopodobieństwo dla gospodarza (Player 1 / Home)
+    ai_prob_home = float(model.predict_proba(features)[0][1])
+    ai_prob_away = 1.0 - ai_prob_home
     
-    b = odds - 1
-    p = ai_prob
+    odds_home = m['odds_home']
+    odds_away = m['odds_away']
+    
+    # Obliczamy value dla obu stron i wybieramy tę z lepszym edge
+    edge_home = (ai_prob_home * odds_home) - 1
+    edge_away = (ai_prob_away * odds_away) - 1
+    
+    if edge_home >= edge_away:
+        best_pick = m['home']
+        best_prob = ai_prob_home
+        best_odds = odds_home
+        best_edge = edge_home
+    else:
+        best_pick = m['away']
+        best_prob = ai_prob_away
+        best_odds = odds_away
+        best_edge = edge_away
+    
+    b = best_odds - 1
+    p = best_prob
     q = 1 - p
     kelly_f = (b * p - q) / b if b > 0 else 0
-    stake = max(0, bankroll * kelly_f * kelly_fraction) if edge > 0 else 0
+    stake = max(0, bankroll * kelly_f * kelly_fraction) if best_edge > 0 else 0
     
     match_name = f"{m['home']} vs {m['away']}"
     match_id = m['id']
     
-    if edge > 0.03 and stake > 0:
+    if best_edge > 0.03 and stake > 0:
         cursor.execute("SELECT id FROM bets WHERE id = ?", (match_id,))
         if not cursor.fetchone():
             cursor.execute("INSERT INTO bets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                           (match_id, datetime.now().strftime("%Y-%m-%d"), discipline, match_name, odds, ai_prob, edge, stake, "Oczekujący"))
+                           (match_id, datetime.now().strftime("%Y-%m-%d"), discipline, match_name, best_odds, best_prob, best_edge, stake, "Oczekujący"))
             db_conn.commit()
 
     m_copy = m.copy()
     m_copy.update({
-        "ai_prob": ai_prob,
-        "edge": edge,
+        "best_pick": best_pick,
+        "ai_prob": best_prob,
+        "odds": best_odds,
+        "edge": best_edge,
         "stake": round(stake, 2)
     })
     analyzed_matches.append(m_copy)
@@ -233,24 +253,21 @@ tab1, tab2 = st.tabs(["🔥 Autonomiczne Value (Najbliższe 24h-36h)", "📁 Rej
 
 with tab1:
     st.subheader(f"🤖 Analiza kwantowa dla: {discipline}")
-    st.caption("Filtrowanie aktywne: Pokazywane są wyłącznie mecze zaplanowane na najbliższe godziny.")
+    st.caption("Filtrowanie aktywne: System ocenia value dla obu stron i wskazuje właściwego faworyta.")
     
     if not analyzed_matches:
         st.warning("Brak aktywnych spotkań w API na najbliższe 24-36 godzin.")
     else:
         for m in analyzed_matches:
             edge_pct = round(m['edge'] * 100, 1)
-            # Jasne wskazanie faworyta do obstawienia (gospodarz przy szansie > 50%)
-            recommended_pick = m['home'] if m['ai_prob'] >= 0.5 else m['away']
-            
             with st.container():
                 col1, col2, col3 = st.columns([4, 2, 2])
                 with col1:
                     st.markdown(f"### {m['home']} vs {m['away']}")
                     st.caption(f"Data rozpoczęcia: {m.get('commence_time', 'Najbliższe godziny')}")
                     
-                    # WYRAŹNA SUGESTIA TYPU
-                    st.markdown(markdown_text := f"🎯 **Typ AI (Na co postawić):** `{recommended_pick}`")
+                    # POPRAWIONE: Wskazuje faktycznego faworyta z najwyższym value
+                    st.markdown(f"🎯 **Typ AI (Na co postawić):** `{m['best_pick']}`")
                     
                     if m['edge'] > 0.03:
                         st.success(f"🔥 VALUE (+{edge_pct}%) | Sugerowana Stawka: **{m['stake']} PLN**")
@@ -259,7 +276,7 @@ with tab1:
                 with col2:
                     st.metric("Szansa AI", f"{round(m['ai_prob'] * 100, 1)}%")
                 with col3:
-                    st.metric("Kurs", f"{m['odds_home']}")
+                    st.metric("Kurs", f"{m['odds']}")
                 st.divider()
 
 with tab2:
@@ -269,4 +286,4 @@ with tab2:
         st.info("Brak zapisanych zakładów w bazie danych.")
     else:
         st.dataframe(df_bets, use_container_width=True)
-        
+    
