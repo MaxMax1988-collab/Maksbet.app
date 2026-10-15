@@ -40,7 +40,7 @@ st.markdown("""
 ODDS_API_KEY = "f13c7d2c08077c2894cab879d0905234"
 API_SPORTS_KEY = "4d4ac6506b603ab89c0222ee1e32d6b7"
 
-# --- BAZA DANYCH SQLITE Z POLEM WYNIKU ---
+# --- BAZA DANYCH SQLITE Z AUTOMATYCZNĄ MIGRACJĄ KOLUMN ---
 def init_db():
     conn = sqlite3.connect("bets_database.db", check_same_thread=False)
     cursor = conn.cursor()
@@ -58,6 +58,11 @@ def init_db():
             profit REAL
         )
     ''')
+    # Bezpieczne dodanie kolumny profit, jeśli jej brakuje w starszej bazie
+    try:
+        cursor.execute("ALTER TABLE bets ADD COLUMN profit REAL DEFAULT 0.0")
+    except sqlite3.OperationalError:
+        pass # Kolumna już istnieje
     conn.commit()
     return conn
 
@@ -273,7 +278,6 @@ with tab1:
                     </div>
                 """, unsafe_allow_html=True)
                 
-                # Wizualny pasek postępu szans AI
                 st.progress(m['ai_prob'], text=f"Rozkład szans AI dla typu: {prob_pct}%")
                 st.divider()
 
@@ -284,13 +288,12 @@ with tab2:
     if df_bets.empty:
         st.info("Brak zapisanych zakładów w bazie danych.")
     else:
-        # Statystyki zbiorcze (ROI, Winrate, Zysk)
         total_bets = len(df_bets)
         settled_bets = df_bets[df_bets['status'] != 'Oczekujący']
         won_bets = df_bets[df_bets['status'] == 'Wygrany']
         
         winrate = (len(won_bets) / len(settled_bets) * 100) if len(settled_bets) > 0 else 0.0
-        total_profit = df_bets['profit'].sum()
+        total_profit = df_bets['profit'].sum() if 'profit' in df_bets.columns else 0.0
         
         col_m1, col_m2, col_m3 = st.columns(3)
         with col_m1:
@@ -307,7 +310,7 @@ with tab3:
     st.subheader("📈 Krzywa Wzrostu Kapitału")
     df_bets = pd.read_sql("SELECT date, profit FROM bets", db_conn)
     
-    if df_bets.empty or df_bets['profit'].sum() == 0:
+    if df_bets.empty or 'profit' not in df_bets.columns or df_bets['profit'].sum() == 0:
         st.info("Wykres wygeneruje się automatycznie po rozegraniu i rozliczeniu pierwszych meczów w bazie danych.")
     else:
         df_bets['cumulative_profit'] = df_bets['profit'].cumsum() + bankroll
@@ -317,4 +320,3 @@ with tab3:
             tooltip=['date', 'cumulative_profit']
         ).properties(height=350)
         st.altair_chart(chart, use_container_width=True)
-    
