@@ -49,18 +49,6 @@ st.markdown("""
         border-right: 1px solid #334155;
         border-bottom: 1px solid #334155;
     }
-    /* Badge Steam Move */
-    .steam-badge {
-        background: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%);
-        color: white;
-        padding: 4px 10px;
-        border-radius: 6px;
-        font-size: 11px;
-        font-weight: 700;
-        float: right;
-        letter-spacing: 0.5px;
-        box-shadow: 0 2px 4px rgba(239, 68, 68, 0.4);
-    }
     /* Stylowanie przycisków */
     .stButton>button {
         background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
@@ -117,87 +105,100 @@ def init_db():
 
 db_conn = init_db()
 
+# --- OPTYMALIZACJA: AGRESYWNY CACHING ZAPYTAN DO API ---
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_odds_cached(discipline_name, odds_key):
+    now = datetime.utcnow()
+    from_time = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    to_time = (now + timedelta(hours=36)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    
+    sport_keys = []
+    if discipline_name == "🏀 NBA Koszykówka":
+        sport_keys = ["basketball_nba"]
+    elif discipline_name == "🏒 NHL Hokej":
+        sport_keys = ["icehockey_nhl"]
+    elif discipline_name == "🎾 Tenis (WTA/ATP)":
+        try:
+            sports_res = requests.get(f"https://api.the-odds-api.com/v4/sports/?apiKey={odds_key}", timeout=10)
+            if sports_res.status_code == 200:
+                all_sports = sports_res.json()
+                sport_keys = [s['key'] for s in all_sports if s.get('group') == 'Tennis' and s.get('active')]
+        except Exception:
+            sport_keys = []
+        
+        if not sport_keys:
+            sport_keys = ["tennis_atp_us_open", "tennis_wta_us_open"]
+
+    all_matches = []
+    
+    for key in sport_keys:
+        url = f"https://api.the-odds-api.com/v4/sports/{key}/odds/?apiKey={odds_key}&regions=eu&markets=h2h&commenceTimeFrom={from_time}&commenceTimeTo={to_time}"
+        try:
+            res = requests.get(url, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                for match in data:
+                    home = match.get('home_team')
+                    away = match.get('away_team')
+                    commence_time = match.get('commence_time')
+                    
+                    odds_home, odds_away = 1.90, 1.90
+                    bookmakers = match.get('bookmakers', [])
+                    if bookmakers:
+                        markets = bookmakers[0].get('markets', [])
+                        if markets:
+                            outcomes = markets[0].get('outcomes', [])
+                            for o in outcomes:
+                                if o.get('name') == home:
+                                    odds_home = o.get('price', 1.90)
+                                elif o.get('name') == away:
+                                    odds_away = o.get('price', 1.90)
+
+                    prob_raw_home = 1.0 / odds_home
+                    prob_raw_away = 1.0 / odds_away
+                    total_vig = prob_raw_home + prob_raw_away
+                    implied_home = prob_raw_home / total_vig
+
+                    all_matches.append({
+                        "id": match.get('id'),
+                        "home": home,
+                        "away": away,
+                        "commence_time": commence_time,
+                        "odds_home": float(odds_home),
+                        "odds_away": float(odds_away),
+                        "form_diff": (implied_home - 0.5),
+                        "home_away_adv": 0.05,
+                        "fatigue_diff": 0.0,
+                        "off_diff": (implied_home - 0.5) * 0.4,
+                        "def_diff": -(implied_home - 0.5) * 0.4,
+                        "elo_diff": (implied_home - 0.5) * 50,
+                        "h2h": implied_home
+                    })
+        except Exception:
+            continue
+            
+    return all_matches
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_scores_cached(sport_key, odds_key):
+    scores_url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores/?apiKey={odds_key}&daysFrom=2"
+    try:
+        res = requests.get(scores_url, timeout=10)
+        if res.status_code == 200:
+            return res.json()
+    except Exception:
+        pass
+    return []
+
 class AutonomousDataFetcher:
     def __init__(self, odds_key):
         self.odds_key = odds_key
 
     def get_market_data(self, discipline_name):
-        now = datetime.utcnow()
-        from_time = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-        to_time = (now + timedelta(hours=36)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        
-        sport_keys = []
-        if discipline_name == "🏀 NBA Koszykówka":
-            sport_keys = ["basketball_nba"]
-        elif discipline_name == "🏒 NHL Hokej":
-            sport_keys = ["icehockey_nhl"]
-        elif discipline_name == "🎾 Tenis (WTA/ATP)":
-            try:
-                sports_res = requests.get(f"https://api.the-odds-api.com/v4/sports/?apiKey={self.odds_key}", timeout=10)
-                if sports_res.status_code == 200:
-                    all_sports = sports_res.json()
-                    sport_keys = [s['key'] for s in all_sports if s.get('group') == 'Tennis' and s.get('active')]
-            except Exception:
-                sport_keys = []
-            
-            if not sport_keys:
-                sport_keys = ["tennis_atp_us_open", "tennis_wta_us_open"]
-
-        all_matches = []
-        
-        for key in sport_keys:
-            url = f"https://api.the-odds-api.com/v4/sports/{key}/odds/?apiKey={self.odds_key}&regions=eu&markets=h2h&commenceTimeFrom={from_time}&commenceTimeTo={to_time}"
-            try:
-                res = requests.get(url, timeout=10)
-                if res.status_code == 200:
-                    data = res.json()
-                    for match in data:
-                        home = match.get('home_team')
-                        away = match.get('away_team')
-                        commence_time = match.get('commence_time')
-                        
-                        odds_home, odds_away = 1.90, 1.90
-                        bookmakers = match.get('bookmakers', [])
-                        if bookmakers:
-                            markets = bookmakers[0].get('markets', [])
-                            if markets:
-                                outcomes = markets[0].get('outcomes', [])
-                                for o in outcomes:
-                                    if o.get('name') == home:
-                                        odds_home = o.get('price', 1.90)
-                                    elif o.get('name') == away:
-                                        odds_away = o.get('price', 1.90)
-
-                        prob_raw_home = 1.0 / odds_home
-                        prob_raw_away = 1.0 / odds_away
-                        total_vig = prob_raw_home + prob_raw_away
-                        implied_home = prob_raw_home / total_vig
-                        
-                        market_movement = np.random.choice([-0.03, 0.0, 0.01, -0.05], p=[0.3, 0.4, 0.2, 0.1])
-
-                        all_matches.append({
-                            "id": match.get('id'),
-                            "home": home,
-                            "away": away,
-                            "commence_time": commence_time,
-                            "odds_home": float(odds_home),
-                            "odds_away": float(odds_away),
-                            "form_diff": (implied_home - 0.5),
-                            "home_away_adv": 0.05,
-                            "fatigue_diff": 0.0,
-                            "off_diff": (implied_home - 0.5) * 0.4,
-                            "def_diff": -(implied_home - 0.5) * 0.4,
-                            "elo_diff": (implied_home - 0.5) * 50,
-                            "h2h": implied_home,
-                            "market_movement": market_movement
-                        })
-            except Exception:
-                continue
-                
-        return all_matches
+        return fetch_odds_cached(discipline_name, self.odds_key)
 
     def auto_settle_bets(self, conn):
-        """Automatycznie pobiera wyniki z API i rozlicza oczekujące zakłady w bazie."""
+        """Automatycznie pobiera wyniki z API (z cache) i rozlicza oczekujące zakłady w bazie."""
         cursor = conn.cursor()
         cursor.execute("SELECT id, sport, odds, stake, best_pick, home_team, away_team FROM bets WHERE status = 'Oczekujący'")
         pending_bets = cursor.fetchall()
@@ -215,38 +216,33 @@ class AutonomousDataFetcher:
             bet_id, sport, odds, stake, best_pick, home_team, away_team = bet
             s_key = sport_key_map.get(sport, "icehockey_nhl")
             
-            scores_url = f"https://api.the-odds-api.com/v4/sports/{s_key}/scores/?apiKey={self.odds_key}&daysFrom=2"
-            try:
-                res = requests.get(scores_url, timeout=10)
-                if res.status_code == 200:
-                    matches_data = res.json()
-                    for match in matches_data:
-                        if match.get('id') == bet_id and match.get('completed'):
-                            scores = match.get('scores', [])
-                            if scores:
-                                winner = None
-                                max_score = -1
-                                for s in scores:
-                                    sc_val = float(s.get('score', 0))
-                                    if sc_val > max_score:
-                                        max_score = sc_val
-                                        winner = s.get('name')
-                                        
-                                if winner:
-                                    if winner == best_pick:
-                                        status = "Wygrany"
-                                        profit = round(stake * (odds - 1), 2)
-                                    else:
-                                        status = "Przegrany"
-                                        profit = round(-stake, 2)
-                                        
-                                    cursor.execute(
-                                        "UPDATE bets SET status = ?, profit = ? WHERE id = ?",
-                                        (status, profit, bet_id)
-                                    )
-                                    conn.commit()
-            except Exception:
-                continue
+            matches_data = fetch_scores_cached(s_key, self.odds_key)
+            if matches_data:
+                for match in matches_data:
+                    if match.get('id') == bet_id and match.get('completed'):
+                        scores = match.get('scores', [])
+                        if scores:
+                            winner = None
+                            max_score = -1
+                            for s in scores:
+                                sc_val = float(s.get('score', 0))
+                                if sc_val > max_score:
+                                    max_score = sc_val
+                                    winner = s.get('name')
+                                    
+                            if winner:
+                                if winner == best_pick:
+                                    status = "Wygrany"
+                                    profit = round(stake * (odds - 1), 2)
+                                else:
+                                    status = "Przegrany"
+                                    profit = round(-stake, 2)
+                                    
+                                cursor.execute(
+                                    "UPDATE bets SET status = ?, profit = ? WHERE id = ?",
+                                    (status, profit, bet_id)
+                                )
+                                conn.commit()
 
 @st.cache_resource
 def init_self_learning_xgboost():
@@ -259,8 +255,7 @@ def init_self_learning_xgboost():
         'off_diff': np.random.normal(0, 0.08, n),
         'def_diff': np.random.normal(0, 0.08, n),
         'elo_diff': np.random.normal(0, 30, n),
-        'h2h': np.random.uniform(0.3, 0.7, n),
-        'market_movement': np.random.normal(0, 0.01, n)
+        'h2h': np.random.uniform(0.3, 0.7, n)
     })
     
     score = (X['form_diff'] * 0.8 + X['elo_diff']/50 * 0.5 + np.random.normal(0, 0.3, n))
@@ -277,9 +272,9 @@ fetcher = AutonomousDataFetcher(ODDS_API_KEY)
 fetcher.auto_settle_bets(db_conn)
 
 sport_weights = {
-    "🏀 NBA Koszykówka": {"Forma Ostatnich Meczów": 0.20, "Przewaga Dom/Wyjazd": 0.15, "Zmęczenie / Terminarz": 0.15, "Siła Ataku": 0.18, "Siła Obrony": 0.12, "Ranking Elo": 0.10, "H2H (Bezpośrednie)": 0.05, "Ruch Kursów (Market)": 0.05},
-    "🏒 NHL Hokej": {"Forma Ostatnich Meczów": 0.15, "Przewaga Dom/Wyjazd": 0.10, "Zmęczenie / Terminarz": 0.18, "Siła Ataku": 0.15, "Siła Obrony": 0.20, "Ranking Elo": 0.10, "H2H (Bezpośrednie)": 0.07, "Ruch Kursów (Market)": 0.05},
-    "🎾 Tenis (WTA/ATP)": {"Forma Ostatnich Meczów": 0.35, "Przewaga Dom/Wyjazd": 0.00, "Zmęczenie / Terminarz": 0.20, "Siła Ataku": 0.10, "Siła Obrony": 0.05, "Ranking Elo": 0.15, "H2H (Bezpośrednie)": 0.10, "Ruch Kursów (Market)": 0.05}
+    "🏀 NBA Koszykówka": {"Forma Ostatnich Meczów": 0.22, "Przewaga Dom/Wyjazd": 0.16, "Zmęczenie / Terminarz": 0.16, "Siła Ataku": 0.20, "Siła Obrony": 0.14, "Ranking Elo": 0.08, "H2H (Bezpośrednie)": 0.04},
+    "🏒 NHL Hokej": {"Forma Ostatnich Meczów": 0.18, "Przewaga Dom/Wyjazd": 0.12, "Zmęczenie / Terminarz": 0.20, "Siła Ataku": 0.16, "Siła Obrony": 0.22, "Ranking Elo": 0.08, "H2H (Bezpośrednie)": 0.04},
+    "🎾 Tenis (WTA/ATP)": {"Forma Ostatnich Meczów": 0.40, "Przewaga Dom/Wyjazd": 0.00, "Zmęczenie / Terminarz": 0.25, "Siła Ataku": 0.10, "Siła Obrony": 0.05, "Ranking Elo": 0.10, "H2H (Bezpośrednie)": 0.10}
 }
 
 # --- PANEL BOCZNY ---
@@ -323,8 +318,8 @@ for m in raw_matches:
     features = pd.DataFrame([[
         m['form_diff'], m['home_away_adv'], m['fatigue_diff'],
         m['off_diff'], m['def_diff'], m['elo_diff'],
-        m['h2h'], m['market_movement']
-    ]], columns=['form_diff', 'home_away_adv', 'fatigue_diff', 'off_diff', 'def_diff', 'elo_diff', 'h2h', 'market_movement'])
+        m['h2h']
+    ]], columns=['form_diff', 'home_away_adv', 'fatigue_diff', 'off_diff', 'def_diff', 'elo_diff', 'h2h'])
     
     ai_prob_home = float(model.predict_proba(features)[0][1])
     
@@ -346,13 +341,11 @@ for m in raw_matches:
         best_prob = ai_prob_home
         best_odds = odds_home
         best_edge = edge_home
-        is_steam = m['market_movement'] < -0.02
     else:
         best_pick = m['away']
         best_prob = ai_prob_away
         best_odds = odds_away
         best_edge = edge_away
-        is_steam = m['market_movement'] < -0.02
     
     b = best_odds - 1
     p = best_prob
@@ -378,8 +371,7 @@ for m in raw_matches:
         "ai_prob": best_prob,
         "odds": best_odds,
         "edge": best_edge,
-        "stake": round(stake, 2),
-        "is_steam": is_steam
+        "stake": round(stake, 2)
     })
     analyzed_matches.append(m_copy)
 
@@ -391,7 +383,7 @@ tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value", "📁 Rejestr, ROI & Heatmapa
 
 with tab1:
     st.subheader(f"Terminal Analityczny: {discipline}")
-    st.caption(f"Filtrowanie aktywne: Minimalny Edge >= {int(min_edge_slider*100)}% + Auto-Settlement Active")
+    st.caption(f"Filtrowanie aktywne: Minimalny Edge >= {int(min_edge_slider*100)}% + Caching (Ochrona API) Active")
     
     if not analyzed_matches:
         st.warning("Brak spotkań spełniających kryteria przewagi rynkowej w najbliższych 36h.")
@@ -399,12 +391,11 @@ with tab1:
         for m in analyzed_matches:
             edge_pct = round(m['edge'] * 100, 1)
             prob_pct = round(m['ai_prob'] * 100, 1)
-            steam_html = '<span class="steam-badge">🔥 STEAM MOVE</span>' if m['is_steam'] else ''
             
             with st.container():
                 st.markdown(f"""
                     <div class="value-card">
-                        <h3>{m['home']} vs {m['away']} {steam_html}</h3>
+                        <h3>{m['home']} vs {m['away']}</h3>
                         <p style="color: #94a3b8; font-size: 12px;">Start: {m.get('commence_time', 'Najbliższe godziny')}</p>
                         <p>🎯 <b>Typ AI:</b> <span style="color: #60a5fa;">{m['best_pick']}</span></p>
                         <p>🔥 <b>Value:</b> <span style="color: #34d399;">+{edge_pct}%</span> | 💰 <b>Stawka:</b> {m['stake']} PLN</p>
@@ -506,3 +497,4 @@ with tab3:
             tooltip=['date', 'cumulative_profit']
         ).properties(height=350)
         st.altair_chart(chart, use_container_width=True)
+                
