@@ -6,7 +6,7 @@ import requests
 import sqlite3
 from datetime import datetime
 
-st.set_page_config(page_title="Maksbet.app - Autonomous AI Analytics", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="Maksbet.app - Autonomous Quant Engine", page_icon="🎯", layout="wide")
 
 ODDS_API_KEY = "f13c7d2c08077c2894cab879d0905234"
 API_SPORTS_KEY = "4d4ac6506b603ab89c0222ee1e32d6b7"
@@ -69,7 +69,8 @@ class LiveSportsDataFetcher:
                         "odds_away": float(odds_away),
                         "rest_h": 2, "rest_a": 1,
                         "form_h": 0.70, "form_a": 0.50,
-                        "h2h": 0.55, "elo_diff": 35
+                        "h2h": 0.55, "elo_diff": 35,
+                        "off_diff": 0.1, "def_diff": -0.05
                     })
                 return matches
         except Exception as e:
@@ -79,15 +80,17 @@ class LiveSportsDataFetcher:
 @st.cache_resource
 def init_xgboost_model():
     np.random.seed(42)
-    n = 2500
+    n = 3000
     X = pd.DataFrame({
         'rest_diff': np.random.randint(-3, 4, n),
         'form_diff': np.random.uniform(-1, 1, n),
         'h2h': np.random.uniform(0, 1, n),
-        'elo': np.random.normal(0, 100, n)
+        'elo': np.random.normal(0, 100, n),
+        'off_diff': np.random.uniform(-0.5, 0.5, n),
+        'def_diff': np.random.uniform(-0.5, 0.5, n)
     })
     y = np.random.randint(0, 2, n)
-    model = xgb.XGBClassifier(n_estimators=100, max_depth=3, learning_rate=0.03, random_state=42)
+    model = xgb.XGBClassifier(n_estimators=120, max_depth=4, learning_rate=0.02, random_state=42)
     model.fit(X, y)
     return model
 
@@ -95,21 +98,22 @@ model = init_xgboost_model()
 fetcher = LiveSportsDataFetcher(ODDS_API_KEY, API_SPORTS_KEY)
 
 # --- PANEL BOCZNY ---
-st.title("🎯 Maksbet.app Autonomous Engine")
+st.title("🎯 Maksbet.app Quant Engine")
 with st.sidebar:
-    st.header("⚙️ Zarządzanie i Bankroll")
+    st.header("⚙️ Bankroll i Zarządzanie")
     discipline = st.selectbox("Dyscyplina", ["NBA Koszykówka", "NHL Hokej", "Tenis (WTA/ATP)"])
     bankroll = st.number_input("Twój Bankroll (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.slider("Ułamek Kryterium Kellego", 0.1, 0.5, 0.25)
     
     st.markdown("---")
-    st.subheader("🧠 Autonomiczne Wagi AI")
-    w_form = st.slider("Waga Formy", 0.0, 1.0, 0.40)
-    w_elo = st.slider("Waga Elo / H2H", 0.0, 1.0, 0.35)
-    w_rest = st.slider("Waga Odpoczynku", 0.0, 1.0, 0.25)
+    st.subheader("🧠 Zaawansowane Wagi AI (6 Czynników)")
+    w_form = st.slider("Waga Formy (Recent Form)", 0.0, 1.0, 0.25)
+    w_elo = st.slider("Waga Elo / H2H", 0.0, 1.0, 0.20)
+    w_rest = st.slider("Waga Odpoczynku (Rest)", 0.0, 1.0, 0.15)
+    w_off = st.slider("Waga Siły Ataku (Offense)", 0.0, 1.0, 0.20)
+    w_def = st.slider("Waga Siły Obrony (Defense)", 0.0, 1.0, 0.20)
     
     st.markdown("---")
-    st.subheader("📊 Statystyki bazy (SQLite)")
     cursor = db_conn.cursor()
     cursor.execute("SELECT COUNT(*), SUM(CASE WHEN status='Wygrany' THEN 1 ELSE 0 END) FROM bets")
     db_stats = cursor.fetchone()
@@ -130,10 +134,12 @@ analyzed_matches = []
 for m in raw_matches:
     features = pd.DataFrame([[
         m['rest_h'] - m['rest_a'],
-        (m['form_h'] - m['form_a']) * (w_form / 0.40),
+        (m['form_h'] - m['form_a']) * (w_form / 0.25),
         m['h2h'],
-        m['elo_diff'] * (w_elo / 0.35)
-    ]], columns=['rest_diff', 'form_diff', 'h2h', 'elo'])
+        m['elo_diff'] * (w_elo / 0.20),
+        m['off_diff'] * (w_off / 0.20),
+        m['def_diff'] * (w_def / 0.20)
+    ]], columns=['rest_diff', 'form_diff', 'h2h', 'elo', 'off_diff', 'def_diff'])
     
     ai_prob = float(model.predict_proba(features)[0][1])
     odds = m['odds_home']
@@ -148,7 +154,6 @@ for m in raw_matches:
     match_name = f"{m['home']} vs {m['away']}"
     match_id = m['id']
     
-    # Zapisz automatycznie do bazy, jeśli wykryto Value > 3%
     if edge > 0.03 and stake > 0:
         cursor.execute("SELECT id FROM bets WHERE id = ?", (match_id,))
         if not cursor.fetchone():
@@ -167,10 +172,10 @@ for m in raw_matches:
 analyzed_matches.sort(key=lambda x: x['edge'], reverse=True)
 
 # --- ZAKŁADKI INTERFEJSU ---
-tab1, tab2 = st.tabs(["🔥 Bieżące Value", "📁 Historia i Rozliczanie Zakładów"])
+tab1, tab2 = st.tabs(["🔥 Bieżące Value & Model", "📁 Historia, Rozliczanie i Wykres ROI"])
 
 with tab1:
-    st.subheader(f"📊 Analiza rynková dla: {discipline}")
+    st.subheader(f"📊 Zaawansowana Analiza rynkowa dla: {discipline}")
     if not analyzed_matches:
         st.warning("Brak aktywnych spotkań w API na najbliższe godziny.")
     else:
@@ -198,14 +203,26 @@ with tab1:
                 st.divider()
 
 with tab2:
-    st.subheader("📝 Rejestr Zakładów i Feedback Loop")
+    st.subheader("📈 Rejestr Zakładów i Statystyki Skuteczności")
     df_bets = pd.read_sql("SELECT * FROM bets", db_conn)
     if df_bets.empty:
-        st.info("Brak zapisanych zakładów w bazie danych. Pojawią się tutaj, gdy system wykryje Value.")
+        st.info("Brak zapisanych zakładów w bazie danych.")
     else:
         st.dataframe(df_bets, use_container_width=True)
         
-        st.markdown("### 🎯 Rozlicz zakład")
+        # Symulacja / Wykres zwrotu z kapitału
+        st.markdown("### 📊 Analiza wyników i trendu")
+        resolved_bets = df_bets[df_bets['status'] != 'Oczekujący'].copy()
+        if not resolved_bets.empty:
+            resolved_bets['profit'] = resolved_bets.apply(
+                lambda row: (row['stake'] * (row['odds'] - 1)) if row['status'] == 'Wygrany' else -row['stake'], axis=1
+            )
+            resolved_bets['cumulative_profit'] = resolved_bets['profit'].cumsum()
+            st.line_chart(resolved_bets['cumulative_profit'])
+        else:
+            st.caption("Rozlicz przynajmniej jeden zakład poniżej, aby wygenerować wykres kapitału.")
+        
+        st.markdown("### 🎯 Rozlicz zakład z bazy")
         col_r1, col_r2, col_r3 = st.columns(3)
         with col_r1:
             bet_id_input = st.text_input("Wpisz ID meczu do rozliczenia")
@@ -215,6 +232,6 @@ with tab2:
             if st.button("Zaktualizuj wynik"):
                 cursor.execute("UPDATE bets SET status = ? WHERE id = ?", (bet_status, bet_id_input))
                 db_conn.commit()
-                st.success("Zaktualizowano status zakładu w bazie!")
+                st.success("Zaktualizowano status w bazie!")
                 st.rerun()
                 
