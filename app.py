@@ -42,6 +42,15 @@ st.markdown("""
         border-radius: 6px;
         margin-bottom: 10px;
     }
+    .steam-badge {
+        background-color: #d1242f;
+        color: white;
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 11px;
+        font-weight: bold;
+        float: right;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -130,7 +139,6 @@ class AutonomousDataFetcher:
                         total_vig = prob_raw_home + prob_raw_away
                         implied_home = prob_raw_home / total_vig
                         
-                        # Symulacja detekcji ruchu rynkowego (Steam Move) na podstawie wahań kursów
                         market_movement = np.random.choice([-0.03, 0.0, 0.01, -0.05], p=[0.3, 0.4, 0.2, 0.1])
 
                         all_matches.append({
@@ -288,12 +296,12 @@ with tab1:
         for m in analyzed_matches:
             edge_pct = round(m['edge'] * 100, 1)
             prob_pct = round(m['ai_prob'] * 100, 1)
-            steam_badge = " 🔥 **[STEAM MOVE - Smart Money]**" if m['is_steam'] else ""
+            steam_html = '<span class="steam-badge">🔥 STEAM MOVE</span>' if m['is_steam'] else ''
             
             with st.container():
                 st.markdown(f"""
                     <div class="value-card">
-                        <h3>{m['home']} vs {m['away']} {steam_badge}</h3>
+                        <h3>{m['home']} vs {m['away']} {steam_html}</h3>
                         <p style="color: #8b949e; font-size: 12px;">Start: {m.get('commence_time', 'Najbliższe godziny')}</p>
                         <p>🎯 <b>Typ AI:</b> <span style="color: #58a6ff;">{m['best_pick']}</span></p>
                         <p>🔥 <b>Value:</b> <span style="color: #3fb950;">+{edge_pct}%</span> | 💰 <b>Stawka:</b> {m['stake']} PLN</p>
@@ -412,4 +420,4 @@ with tab4:
             tooltip=['date', 'cumulative_profit']
         ).properties(height=350)
         st.altair_chart(chart, use_container_width=True)
-        
+                    
