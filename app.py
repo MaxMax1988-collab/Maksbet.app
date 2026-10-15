@@ -9,7 +9,7 @@ import altair as alt
 import io
 import os
 
-# --- KONFIGURACJA STRONY ---
+# --- KONFIGURACJA STRONY ORAZ PWA ---
 st.set_page_config(
     page_title="Maksbet.app - Autonomous Quant Engine",
     page_icon="🎯",
@@ -17,8 +17,24 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- CYBERPUNKOWY / TERMINALOWY DESIGN CSS ---
+# Wstrzyknięcie metatagów PWA (Progressive Web App) dla urządzeń mobilnych
 st.markdown("""
+    <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+        <meta name="mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta name="theme-color" content="#0e1117">
+        <link rel="manifest" href="data:application/manifest+json;charset=utf-8,{
+            'name': 'Maksbet.app Quant Engine',
+            'short_name': 'Maksbet',
+            'start_url': '.',
+            'display': 'standalone',
+            'background_color': '#0e1117',
+            'theme_color': '#0e1117',
+            'icons': [{'src': 'https://streamlit.io/images/brand/streamlit-mark-color.png', 'sizes': '192x192', 'type': 'image/png'}]
+        }">
+    </head>
     <style>
     .main {
         background-color: #0e1117;
@@ -71,7 +87,22 @@ def init_db():
             best_pick TEXT
         )
     ''')
-    # Sprawdzanie i ewentualne dodawanie nowych kolumn dla starszych wersji bazy
+    
+    # Tabela do dynamicznych wag samo-uczących się
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS model_weights (
+            sport TEXT PRIMARY KEY,
+            form_weight REAL,
+            home_weight REAL,
+            fatigue_weight REAL,
+            off_weight REAL,
+            def_weight REAL,
+            elo_weight REAL,
+            h2h_weight REAL,
+            market_weight REAL
+        )
+    ''')
+    
     for col_def in [
         ("profit", "REAL DEFAULT 0.0"),
         ("home_team", "TEXT"),
@@ -87,6 +118,71 @@ def init_db():
     return conn
 
 db_conn = init_db()
+
+# Domyślne wagi bazowe dla dyscyplin
+DEFAULT_SPORT_WEIGHTS = {
+    "🏀 NBA Koszykówka": {"Forma Ostatnich Meczów": 0.20, "Przewaga Dom/Wyjazd": 0.15, "Zmęczenie / Terminarz": 0.15, "Siła Ataku": 0.18, "Siła Obrony": 0.12, "Ranking Elo": 0.10, "H2H (Bezpośrednie)": 0.05, "Ruch Kursów (Market)": 0.05},
+    "🏒 NHL Hokej": {"Forma Ostatnich Meczów": 0.15, "Przewaga Dom/Wyjazd": 0.10, "Zmęczenie / Terminarz": 0.18, "Siła Ataku": 0.15, "Siła Obrony": 0.20, "Ranking Elo": 0.10, "H2H (Bezpośrednie)": 0.07, "Ruch Kursów (Market)": 0.05},
+    "🎾 Tenis (WTA/ATP)": {"Forma Ostatnich Meczów": 0.35, "Przewaga Dom/Wyjazd": 0.00, "Zmęczenie / Terminarz": 0.20, "Siła Ataku": 0.10, "Siła Obrony": 0.05, "Ranking Elo": 0.15, "H2H (Bezpośrednie)": 0.10, "Ruch Kursów (Market)": 0.05}
+}
+
+def get_current_weights(conn, discipline_name):
+    """Pobiera dynamiczne wagi z bazy lub inicjalizuje domyślnymi."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT form_weight, home_weight, fatigue_weight, off_weight, def_weight, elo_weight, h2h_weight, market_weight FROM model_weights WHERE sport = ?", (discipline_name,))
+    row = cursor.fetchone()
+    
+    base = DEFAULT_SPORT_WEIGHTS[discipline_name]
+    keys = list(base.keys())
+    
+    if not row:
+        # Inicjalizacja domyślnymi
+        vals = list(base.values())
+        cursor.execute("INSERT OR REPLACE INTO model_weights VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (discipline_name, *vals))
+        conn.commit()
+        return base
+    else:
+        return {keys[i]: row[i] for i in range(len(keys))}
+
+def recalibrate_weights_automatically(conn):
+    """Autokalibracja wag: jeśli skuteczność wzrasta, wagi dopasowują się na podstawie historii trafionych kuponów."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT sport, status, edge FROM bets WHERE status != 'Oczekujący'")
+    history = cursor.fetchall()
+    
+    if len(history) < 5:
+        return # Za mało danych do kalibracji
+        
+    df_hist = pd.DataFrame(history, columns=['sport', 'status', 'edge'])
+    for sport in DEFAULT_SPORT_WEIGHTS.keys():
+        sport_data = df_hist[df_hist['sport'] == sport]
+        if len(sport_data) >= 3:
+            won_count = len(sport_data[sport_data['status'] == 'Wygrany'])
+            total_count = len(sport_data)
+            winrate = won_count / total_count
+            
+            # Jeśli winrate przekracza 55%, model delikatnie wzmacnia wiodące czynniki (np. Formę i Market Movement)
+            current = get_current_weights(conn, sport)
+            keys = list(current.keys())
+            vals = list(current.values())
+            
+            if winrate > 0.55:
+                # Delikatna mutacja kwantowa wagi w górę dla formy
+                vals[0] = min(0.45, vals[0] + 0.01)
+                vals[-1] = min(0.15, vals[-1] + 0.005)
+            elif winrate < 0.45:
+                # Korekta w dół w razie słabszej serii
+                vals[0] = max(0.10, vals[0] - 0.01)
+                
+            # Normalizujemy sumę wag do 1.0
+            total_sum = sum(vals)
+            vals = [v / total_sum for v in vals]
+            
+            cursor.execute(
+                "UPDATE model_weights SET form_weight=?, home_weight=?, fatigue_weight=?, off_weight=?, def_weight=?, elo_weight=?, h2h_weight=?, market_weight=? WHERE sport=?",
+                (*vals, sport)
+            )
+            conn.commit()
 
 class AutonomousDataFetcher:
     def __init__(self, odds_key):
@@ -176,7 +272,6 @@ class AutonomousDataFetcher:
         if not pending_bets:
             return
 
-        # Mapowanie dyscyplin na klucze API wyników
         sport_key_map = {
             "🏀 NBA Koszykówka": "basketball_nba",
             "🏒 NHL Hokej": "icehockey_nhl",
@@ -196,7 +291,6 @@ class AutonomousDataFetcher:
                         if match.get('id') == bet_id and match.get('completed'):
                             scores = match.get('scores', [])
                             if scores:
-                                # Ustalenie zwycięzcy na podstawie wyników punktowych
                                 winner = None
                                 max_score = -1
                                 for s in scores:
@@ -246,14 +340,9 @@ def init_self_learning_xgboost():
 model = init_self_learning_xgboost()
 fetcher = AutonomousDataFetcher(ODDS_API_KEY)
 
-# Uruchomienie automatycznego rozliczania zakładów w tle przy każdym załadowaniu aplikacji
+# Uruchomienie automatycznego rozliczania i autokalibracji w tle
 fetcher.auto_settle_bets(db_conn)
-
-sport_weights = {
-    "🏀 NBA Koszykówka": {"Forma Ostatnich Meczów": 0.20, "Przewaga Dom/Wyjazd": 0.15, "Zmęczenie / Terminarz": 0.15, "Siła Ataku": 0.18, "Siła Obrony": 0.12, "Ranking Elo": 0.10, "H2H (Bezpośrednie)": 0.05, "Ruch Kursów (Market)": 0.05},
-    "🏒 NHL Hokej": {"Forma Ostatnich Meczów": 0.15, "Przewaga Dom/Wyjazd": 0.10, "Zmęczenie / Terminarz": 0.18, "Siła Ataku": 0.15, "Siła Obrony": 0.20, "Ranking Elo": 0.10, "H2H (Bezpośrednie)": 0.07, "Ruch Kursów (Market)": 0.05},
-    "🎾 Tenis (WTA/ATP)": {"Forma Ostatnich Meczów": 0.35, "Przewaga Dom/Wyjazd": 0.00, "Zmęczenie / Terminarz": 0.20, "Siła Ataku": 0.10, "Siła Obrony": 0.05, "Ranking Elo": 0.15, "H2H (Bezpośrednie)": 0.10, "Ruch Kursów (Market)": 0.05}
-}
+recalibrate_weights_automatically(db_conn)
 
 # --- PANEL BOCZNY ---
 st.title("🎯 Maksbet.app")
@@ -265,8 +354,9 @@ with st.sidebar:
     min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=1.0, max_value=15.0, value=5.0, step=0.5) / 100.0
     
     st.markdown("---")
-    st.subheader(f"🧠 Automatyczne Wagi AI: {discipline}")
-    for feature_name, weight_val in sport_weights[discipline].items():
+    st.subheader(f"🧠 Dynamiczne Wagi AI: {discipline}")
+    current_active_weights = get_current_weights(db_conn, discipline)
+    for feature_name, weight_val in current_active_weights.items():
         if weight_val > 0:
             st.text(f"{feature_name}: {int(weight_val*100)}%")
             st.progress(weight_val)
@@ -361,7 +451,7 @@ tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value", "📁 Rejestr, ROI & Heatmapa
 
 with tab1:
     st.subheader(f"🤖 Terminal Kwantowy: {discipline}")
-    st.caption(f"Filtrowanie aktywne: Minimalny Edge >= {int(min_edge_slider*100)}% + Detekcja Steam Move (Auto-Settlement Active)")
+    st.caption(f"Filtrowanie aktywne: Minimalny Edge >= {int(min_edge_slider*100)}% + Auto-Calibration & PWA Ready")
     
     if not analyzed_matches:
         st.warning("Brak spotkań spełniających kryteria przewagi rynkowej w najbliższych 36h.")
@@ -399,81 +489,3 @@ with tab2:
         report_buffer = io.StringIO()
         report_buffer.write("=== MAKSBET.APP - RAPORT KWANTOWY TYGODNIA ===\n\n")
         report_buffer.write(f"Data generowania: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
-        report_buffer.write(f"Kapitał początkowy: {bankroll} PLN\n")
-        df_export = pd.read_sql("SELECT * FROM bets", db_conn)
-        report_buffer.write(f"\nLiczba zarejestrowanych zakładów: {len(df_export)}\n\n")
-        report_buffer.write(df_export.to_string() if not df_export.empty else "Brak zakładów w bazie.")
-        
-        st.download_button(
-            label="📄 Pobierz Raport Kwantowy (TXT)",
-            data=report_buffer.getvalue(),
-            file_name=f"Maksbet_Raport_{datetime.now().strftime('%Y%m%d')}.txt",
-            mime="text/plain"
-        )
-
-    df_bets = pd.read_sql("SELECT * FROM bets", db_conn)
-    
-    if df_bets.empty:
-        st.info("Brak zapisanych zakładów w bazie danych. Baza jest czysta i gotowa na autonomiczne typy.")
-    else:
-        total_bets = len(df_bets)
-        settled_bets = df_bets[df_bets['status'] != 'Oczekujący']
-        won_bets = df_bets[df_bets['status'] == 'Wygrany']
-        
-        winrate = (len(won_bets) / len(settled_bets) * 100) if len(settled_bets) > 0 else 0.0
-        total_profit = df_bets['profit'].sum() if 'profit' in df_bets.columns else 0.0
-        total_staked = df_bets['stake'].sum() if 'stake' in df_bets.columns else 0.0
-        
-        roi = (total_profit / total_staked * 100) if total_staked > 0 else 0.0
-        
-        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-        with col_m1:
-            st.metric("Skuteczność (Winrate)", f"{round(winrate, 1)}%")
-        with col_m2:
-            st.metric("Łączny Zysk/Strata", f"{round(total_profit, 2)} PLN")
-        with col_m3:
-            st.metric("ROI", f"{round(roi, 2)}%")
-        with col_m4:
-            st.metric("Wszystkich Zakładów", total_bets)
-            
-        st.markdown("---")
-        
-        st.markdown("### 📊 Heatmapa Skuteczności i Zysku według Przedziałów Kursowych")
-        if not settled_bets.empty:
-            def categorize_odds(odds):
-                if odds < 1.50: return "1.00 - 1.49"
-                elif odds < 1.80: return "1.50 - 1.79"
-                elif odds < 2.10: return "1.80 - 2.09"
-                elif odds < 2.50: return "2.10 - 2.49"
-                else: return "2.50+"
-                
-            settled_bets['odds_range'] = settled_bets['odds'].apply(categorize_odds)
-            range_summary = settled_bets.groupby('odds_range').agg(
-                Liczba=('id', 'count'),
-                Zysk=('profit', 'sum'),
-                Postawiono=('stake', 'sum')
-            ).reset_index()
-            range_summary['ROI (%)'] = np.where(range_summary['Postawiono'] > 0, 
-                                                round((range_summary['Zysk'] / range_summary['Postawiono']) * 100, 2), 0.0)
-            st.dataframe(range_summary, use_container_width=True)
-        else:
-            st.info("Heatmapa kursowa uzupełni się automatycznie po zakończeniu i rozliczeniu pierwszych meczów przez API.")
-
-        st.markdown("---")
-        st.dataframe(df_bets, use_container_width=True)
-
-with tab3:
-    st.subheader("📈 Krzywa Wzrostu Kapitału")
-    df_bets = pd.read_sql("SELECT date, profit FROM bets WHERE status != 'Oczekujący'", db_conn)
-    
-    if df_bets.empty or 'profit' not in df_bets.columns or len(df_bets) == 0:
-        st.info("Wykres wygeneruje się automatycznie po rozegraniu i rozliczeniu pierwszych meczów w tle przez system.")
-    else:
-        df_bets['cumulative_profit'] = df_bets['profit'].cumsum() + bankroll
-        chart = alt.Chart(df_bets).mark_line(strokeWidth=3, color='#3fb950').encode(
-            x='date:T',
-            y='cumulative_profit:Q',
-            tooltip=['date', 'cumulative_profit']
-        ).properties(height=350)
-        st.altair_chart(chart, use_container_width=True)
-            
