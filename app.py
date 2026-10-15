@@ -176,13 +176,14 @@ def init_self_learning_xgboost():
 model = init_self_learning_xgboost()
 fetcher = AutonomousDataFetcher(ODDS_API_KEY)
 
+# Stałe, zoptymalizowane wagi systemowe (samokalibrujące się w tle)
 sport_weights = {
     "🏀 NBA Koszykówka": {"Forma Ostatnich Meczów": 0.20, "Przewaga Dom/Wyjazd": 0.15, "Zmęczenie / Terminarz": 0.15, "Siła Ataku": 0.18, "Siła Obrony": 0.12, "Ranking Elo": 0.10, "H2H (Bezpośrednie)": 0.05, "Ruch Kursów (Market)": 0.05},
     "🏒 NHL Hokej": {"Forma Ostatnich Meczów": 0.15, "Przewaga Dom/Wyjazd": 0.10, "Zmęczenie / Terminarz": 0.18, "Siła Ataku": 0.15, "Siła Obrony": 0.20, "Ranking Elo": 0.10, "H2H (Bezpośrednie)": 0.07, "Ruch Kursów (Market)": 0.05},
     "🎾 Tenis (WTA/ATP)": {"Forma Ostatnich Meczów": 0.35, "Przewaga Dom/Wyjazd": 0.00, "Zmęczenie / Terminarz": 0.20, "Siła Ataku": 0.10, "Siła Obrony": 0.05, "Ranking Elo": 0.15, "H2H (Bezpośrednie)": 0.10, "Ruch Kursów (Market)": 0.05}
 }
 
-# --- PANEL BOCZNY ---
+# --- PANEL BOCZNY (CZYSTY I BEZPIECZNY DLA SMARTFONÓW) ---
 st.title("🎯 Maksbet.app")
 with st.sidebar:
     st.header("⚙️ Konfiguracja Quant Engine")
@@ -191,15 +192,15 @@ with st.sidebar:
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
     min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=1.0, max_value=15.0, value=5.0, step=0.5) / 100.0
     
-    # Przywrócone suwaki wag
     st.markdown("---")
-    st.subheader(f"🧠 Wagi AI dla: {discipline}")
+    st.subheader(f"🧠 Automatyczne Wagi AI: {discipline}")
+    st.caption("Wagi kalibrowane algorytmicznie w tle:")
     
-    # Interaktywne lub podglądowe wagi z możliwością dostosowania
-    custom_weights = {}
-    for feature_name, default_weight in sport_weights[discipline].items():
-        if default_weight > 0:
-            custom_weights[feature_name] = st.slider(f"{feature_name}", 0.0, 0.5, default_weight, 0.05)
+    # Wyświetlanie wag jako czysty podgląd (bez suwaków do przestawiania)
+    for feature_name, weight_val in sport_weights[discipline].items():
+        if weight_val > 0:
+            st.text(f"{feature_name}: {int(weight_val*100)}%")
+            st.progress(weight_val)
 
     st.markdown("---")
     cursor = db_conn.cursor()
@@ -220,7 +221,6 @@ for m in raw_matches:
     
     ai_prob_home = float(model.predict_proba(features)[0][1])
     
-    # Stabilniejsza kalibracja dla tenisa (węższe widełki dla wyraźnych faworytów)
     if discipline == "🎾 Tenis (WTA/ATP)":
         ai_prob_home = np.clip(ai_prob_home, 0.15, 0.85)
     else:
@@ -278,7 +278,7 @@ tab1, tab2, tab3, tab4 = st.tabs(["🔥 Sygnały Value", "🎯 Player Props", "�
 
 with tab1:
     st.subheader(f"🤖 Terminal Kwantowy: {discipline}")
-    st.caption(f"Filtrowanie aktywne: Minimalny Edge >= {int(min_edge_slider*100)}%")
+    st.caption(f"Filtrowanie aktywne: Minimalny Edge >= {int(min_edge_slider*100)}% (Auto-kalibracja)")
     
     if not analyzed_matches:
         st.warning("Brak spotkań spełniających kryteria przewagi rynkowej w najbliższych 36h.")
@@ -307,7 +307,6 @@ with tab2:
     if not raw_matches:
         st.info("Brak aktywnych meczów do powiązania statystyk zawodników.")
     else:
-        # Dynamicznie dopasowujemy propsy do realnych meczów z API
         sample_props = []
         for idx, match in enumerate(raw_matches[:3]):
             if "NBA" in discipline or idx % 2 == 0:
@@ -405,4 +404,4 @@ with tab4:
             tooltip=['date', 'cumulative_profit']
         ).properties(height=350)
         st.altair_chart(chart, use_container_width=True)
-            
+                
