@@ -176,14 +176,13 @@ def init_self_learning_xgboost():
 model = init_self_learning_xgboost()
 fetcher = AutonomousDataFetcher(ODDS_API_KEY)
 
-# Stałe, zoptymalizowane wagi systemowe (samokalibrujące się w tle)
 sport_weights = {
     "🏀 NBA Koszykówka": {"Forma Ostatnich Meczów": 0.20, "Przewaga Dom/Wyjazd": 0.15, "Zmęczenie / Terminarz": 0.15, "Siła Ataku": 0.18, "Siła Obrony": 0.12, "Ranking Elo": 0.10, "H2H (Bezpośrednie)": 0.05, "Ruch Kursów (Market)": 0.05},
     "🏒 NHL Hokej": {"Forma Ostatnich Meczów": 0.15, "Przewaga Dom/Wyjazd": 0.10, "Zmęczenie / Terminarz": 0.18, "Siła Ataku": 0.15, "Siła Obrony": 0.20, "Ranking Elo": 0.10, "H2H (Bezpośrednie)": 0.07, "Ruch Kursów (Market)": 0.05},
     "🎾 Tenis (WTA/ATP)": {"Forma Ostatnich Meczów": 0.35, "Przewaga Dom/Wyjazd": 0.00, "Zmęczenie / Terminarz": 0.20, "Siła Ataku": 0.10, "Siła Obrony": 0.05, "Ranking Elo": 0.15, "H2H (Bezpośrednie)": 0.10, "Ruch Kursów (Market)": 0.05}
 }
 
-# --- PANEL BOCZNY (CZYSTY I BEZPIECZNY DLA SMARTFONÓW) ---
+# --- PANEL BOCZNY ---
 st.title("🎯 Maksbet.app")
 with st.sidebar:
     st.header("⚙️ Konfiguracja Quant Engine")
@@ -194,9 +193,6 @@ with st.sidebar:
     
     st.markdown("---")
     st.subheader(f"🧠 Automatyczne Wagi AI: {discipline}")
-    st.caption("Wagi kalibrowane algorytmicznie w tle:")
-    
-    # Wyświetlanie wag jako czysty podgląd (bez suwaków do przestawiania)
     for feature_name, weight_val in sport_weights[discipline].items():
         if weight_val > 0:
             st.text(f"{feature_name}: {int(weight_val*100)}%")
@@ -274,7 +270,7 @@ for m in raw_matches:
 analyzed_matches.sort(key=lambda x: x['edge'], reverse=True)
 
 # --- INTERFEJS GŁÓWNY (ZAKŁADKI) ---
-tab1, tab2, tab3, tab4 = st.tabs(["🔥 Sygnały Value", "🎯 Player Props", "📁 Rejestr & Raport PDF", "📈 Krzywa Kapitału"])
+tab1, tab2, tab3, tab4 = st.tabs(["🔥 Sygnały Value", "🎯 Player Props", "📁 Rejestr & Dashboard ROI", "📈 Krzywa Kapitału"])
 
 with tab1:
     st.subheader(f"🤖 Terminal Kwantowy: {discipline}")
@@ -341,7 +337,7 @@ with tab2:
             """, unsafe_allow_html=True)
 
 with tab3:
-    st.subheader("📁 Rejestr Monitorowanych Zakładów & Raport Kwantowy PDF")
+    st.subheader("📁 Rejestr Monitorowanych Zakładów & Dashboard Analityczny")
     
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
@@ -378,13 +374,20 @@ with tab3:
         
         winrate = (len(won_bets) / len(settled_bets) * 100) if len(settled_bets) > 0 else 0.0
         total_profit = df_bets['profit'].sum() if 'profit' in df_bets.columns else 0.0
+        total_staked = df_bets['stake'].sum() if 'stake' in df_bets.columns else 0.0
         
-        col_m1, col_m2, col_m3 = st.columns(3)
+        # Obliczanie ROI oraz Yield
+        roi = (total_profit / total_staked * 100) if total_staked > 0 else 0.0
+        yield_val = roi # W uproszczeniu bukmacherskim yield i ROI dla stawkowania stałego/Kellego opierają się na obrocie
+        
+        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
         with col_m1:
             st.metric("Skuteczność (Winrate)", f"{round(winrate, 1)}%")
         with col_m2:
             st.metric("Łączny Zysk/Strata", f"{round(total_profit, 2)} PLN")
         with col_m3:
+            st.metric("ROI", f"{round(roi, 2)}%")
+        with col_m4:
             st.metric("Wszystkich Zakładów", total_bets)
             
         st.markdown("---")
@@ -404,4 +407,4 @@ with tab4:
             tooltip=['date', 'cumulative_profit']
         ).properties(height=350)
         st.altair_chart(chart, use_container_width=True)
-                
+                    
