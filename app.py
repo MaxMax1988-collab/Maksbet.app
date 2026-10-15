@@ -35,13 +35,6 @@ st.markdown("""
         border-radius: 6px;
         margin-bottom: 10px;
     }
-    .prop-card {
-        background-color: #161b22;
-        border-left: 5px solid #1f6feb;
-        padding: 15px;
-        border-radius: 6px;
-        margin-bottom: 10px;
-    }
     .steam-badge {
         background-color: #d1242f;
         color: white;
@@ -193,21 +186,6 @@ sport_weights = {
     "🎾 Tenis (WTA/ATP)": {"Forma Ostatnich Meczów": 0.35, "Przewaga Dom/Wyjazd": 0.00, "Zmęczenie / Terminarz": 0.20, "Siła Ataku": 0.10, "Siła Obrony": 0.05, "Ranking Elo": 0.15, "H2H (Bezpośrednie)": 0.10, "Ruch Kursów (Market)": 0.05}
 }
 
-star_players = {
-    "Toronto Maple Leafs": "Auston Matthews",
-    "Buffalo Sabres": "Tage Thompson",
-    "Vancouver Canucks": "Elias Pettersson",
-    "Florida Panthers": "Matthew Tkachuk",
-    "New Jersey Devils": "Jack Hughes",
-    "New York Rangers": "Artemi Panarin",
-    "Edmonton Oilers": "Connor McDavid",
-    "Boston Bruins": "David Pastrnak",
-    "Los Angeles Lakers": "LeBron James",
-    "Golden State Warriors": "Stephen Curry",
-    "Boston Celtics": "Jayson Tatum",
-    "Dallas Mavericks": "Luka Dončić"
-}
-
 # --- PANEL BOCZNY ---
 st.title("🎯 Maksbet.app")
 with st.sidebar:
@@ -299,7 +277,7 @@ for m in raw_matches:
 analyzed_matches.sort(key=lambda x: x['edge'], reverse=True)
 
 # --- INTERFEJS GŁÓWNY (ZAKŁADKI) ---
-tab1, tab2, tab3, tab4 = st.tabs(["🔥 Sygnały Value", "🎯 Player Props & Lideri", "📁 Rejestr & Dashboard ROI", "📈 Krzywa Kapitału"])
+tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value", "📁 Rejestr & Dashboard ROI", "📈 Krzywa Kapitału"])
 
 with tab1:
     st.subheader(f"🤖 Terminal Kwantowy: {discipline}")
@@ -327,54 +305,6 @@ with tab1:
                 st.divider()
 
 with tab2:
-    st.subheader("🎯 Moduł Player Props & Ranking Liderów")
-    if "NHL" in discipline:
-        st.caption("Predykcja strzelców bramek (Anytime Goalscorer) oraz punktujących w hokeju.")
-    elif "NBA" in discipline:
-        st.caption("Predykcja najlepszych punktujących (Top Scorers) i linii punktowych w koszykówce.")
-    else:
-        st.caption("Predykcja kluczowych statystyk i gemów w tenisie.")
-    
-    if not raw_matches:
-        st.info("Brak aktywnych meczów do powiązania statystyk zawodników.")
-    else:
-        sample_props = []
-        for idx, match in enumerate(raw_matches):
-            team_name = match['home']
-            player_name = star_players.get(team_name, f"Lider ({team_name})")
-            
-            if "NBA" in discipline:
-                prop_text = "Lider Punktowy (Top Scorer): Powyżej 27.5 Pkt"
-                odds_val = round(np.random.uniform(1.85, 2.15), 2)
-            elif "NHL" in discipline:
-                prop_text = "Strzelec Bramki (Anytime Goalscorer)"
-                odds_val = round(np.random.uniform(2.10, 2.80), 2)
-            else:
-                prop_text = "Powyżej 21.5 Gemów w meczu"
-                odds_val = round(np.random.uniform(1.80, 2.10), 2)
-                
-            sample_props.append({
-                "match": f"{match['home']} vs {match['away']}",
-                "time": match.get('commence_time', 'Dzisiaj'),
-                "player": player_name,
-                "team": team_name,
-                "prop": prop_text,
-                "odds": odds_val,
-                "ai_prob": f"{round(np.random.uniform(52.0, 62.0), 1)}%",
-                "edge": f"+{round(np.random.uniform(10.0, 19.0), 1)}%"
-            })
-        
-        for p in sample_props:
-            st.markdown(f"""
-                <div class="prop-card">
-                    <h4>⭐ {p['player']} <span style="font-size: 13px; color: #8b949e;">({p['team']})</span></h4>
-                    <p style="color: #8b949e; font-size: 12px;">Mecz: <b>{p['match']}</b> (Start: {p['time']})</p>
-                    <p>📊 <b>Rynek:</b> {p['prop']} | 📈 <b>Kurs:</b> {p['odds']}</p>
-                    <p>🤖 <b>Szansa AI:</b> <span style="color: #58a6ff;">{p['ai_prob']}</span> | 🔥 <b>Edge:</b> <span style="color: #3fb950;">{p['edge']}</span></p>
-                </div>
-            """, unsafe_allow_html=True)
-
-with tab3:
     st.subheader("📁 Rejestr Monitorowanych Zakładów & Dashboard Analityczny")
     
     col_btn1, col_btn2 = st.columns(2)
@@ -429,7 +359,7 @@ with tab3:
         st.markdown("---")
         st.dataframe(df_bets, use_container_width=True)
 
-with tab4:
+with tab3:
     st.subheader("📈 Krzywa Wzrostu Kapitału")
     df_bets = pd.read_sql("SELECT date, profit FROM bets WHERE status != 'Oczekujący'", db_conn)
     
@@ -443,4 +373,4 @@ with tab4:
             tooltip=['date', 'cumulative_profit']
         ).properties(height=350)
         st.altair_chart(chart, use_container_width=True)
-        
+                    
