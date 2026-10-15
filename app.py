@@ -37,55 +37,75 @@ class AutonomousDataFetcher:
     def __init__(self, odds_key):
         self.odds_key = odds_key
 
-    def get_market_data(self, sport_key):
-        # FILTR DATY: Ściągaj TYLKO mecze rozpoczynające się w ciągu najbliższych 36 godzin
+    def get_market_data(self, discipline_name):
         now = datetime.utcnow()
         from_time = now.strftime("%Y-%m-%dT%H:%M:%SZ")
         to_time = (now + timedelta(hours=36)).strftime("%Y-%m-%dT%H:%M:%SZ")
         
-        url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/?apiKey={self.odds_key}&regions=eu&markets=h2h&commenceTimeFrom={from_time}&commenceTimeTo={to_time}"
-        try:
-            res = requests.get(url, timeout=10)
-            if res.status_code == 200:
-                data = res.json()
-                matches = []
-                for match in data:
-                    home = match.get('home_team')
-                    away = match.get('away_team')
-                    commence_time = match.get('commence_time')
-                    
-                    odds_home, odds_away = 1.90, 1.90
-                    bookmakers = match.get('bookmakers', [])
-                    if bookmakers:
-                        markets = bookmakers[0].get('markets', [])
-                        if markets:
-                            outcomes = markets[0].get('outcomes', [])
-                            for o in outcomes:
-                                if o.get('name') == home:
-                                    odds_home = o.get('price', 1.90)
-                                elif o.get('name') == away:
-                                    odds_away = o.get('price', 1.90)
+        # Obsługa różnych dyscyplin w The Odds API
+        sport_keys = []
+        if discipline_name == "NBA Koszykówka":
+            sport_keys = ["basketball_nba"]
+        elif discipline_name == "NHL Hokej":
+            sport_keys = ["icehockey_nhl"]
+        elif discipline_name == "Tenis (WTA/ATP)":
+            # Automatyczne wykrywanie aktywnych turniejów tenisowych
+            try:
+                sports_res = requests.get(f"https://api.the-odds-api.com/v4/sports/?apiKey={self.odds_key}", timeout=10)
+                if sports_res.status_code == 200:
+                    all_sports = sports_res.json()
+                    sport_keys = [s['key'] for s in all_sports if s.get('group') == 'Tennis' and s.get('active')]
+            except Exception:
+                sport_keys = []
+            
+            if not sport_keys:
+                sport_keys = ["tennis_atp_us_open", "tennis_wta_us_open"]
 
-                    matches.append({
-                        "id": match.get('id'),
-                        "home": home,
-                        "away": away,
-                        "commence_time": commence_time,
-                        "odds_home": float(odds_home),
-                        "odds_away": float(odds_away),
-                        "form_h": 0.72, "form_a": 0.48,
-                        "home_away_adv": 0.15,
-                        "fatigue_diff": -1,
-                        "off_h": 1.12, "off_a": 0.98,
-                        "def_h": 0.95, "def_a": 1.05,
-                        "elo_diff": 45,
-                        "h2h": 0.60,
-                        "market_movement": 0.02
-                    })
-                return matches
-        except Exception as e:
-            st.error(f"Błąd API: {e}")
-        return []
+        all_matches = []
+        
+        for key in sport_keys:
+            url = f"https://api.the-odds-api.com/v4/sports/{key}/odds/?apiKey={self.odds_key}&regions=eu&markets=h2h&commenceTimeFrom={from_time}&commenceTimeTo={to_time}"
+            try:
+                res = requests.get(url, timeout=10)
+                if res.status_code == 200:
+                    data = res.json()
+                    for match in data:
+                        home = match.get('home_team')
+                        away = match.get('away_team')
+                        commence_time = match.get('commence_time')
+                        
+                        odds_home, odds_away = 1.90, 1.90
+                        bookmakers = match.get('bookmakers', [])
+                        if bookmakers:
+                            markets = bookmakers[0].get('markets', [])
+                            if markets:
+                                outcomes = markets[0].get('outcomes', [])
+                                for o in outcomes:
+                                    if o.get('name') == home:
+                                        odds_home = o.get('price', 1.90)
+                                    elif o.get('name') == away:
+                                        odds_away = o.get('price', 1.90)
+
+                        all_matches.append({
+                            "id": match.get('id'),
+                            "home": home,
+                            "away": away,
+                            "commence_time": commence_time,
+                            "odds_home": float(odds_home),
+                            "odds_away": float(odds_away),
+                            "form_h": 0.72, "form_a": 0.48,
+                            "home_away_adv": 0.15,
+                            "fatigue_diff": -1,
+                            "off_h": 1.12, "off_a": 0.98,
+                            "def_h": 0.95, "def_a": 1.05,
+                            "elo_diff": 45,
+                            "h2h": 0.60,
+                            "market_movement": 0.02
+                        })
+            except Exception:
+                continue
+                
+        return all_matches
 
 @st.cache_resource
 def init_advanced_xgboost():
@@ -140,13 +160,7 @@ with st.sidebar:
     total_tracked = cursor.fetchone()[0]
     st.metric("Monitorowane zakłady", total_tracked)
 
-sport_map = {
-    "NBA Koszykówka": "basketball_nba",
-    "NHL Hokej": "icehockey_nhl",
-    "Tenis (WTA/ATP)": "tennis_atp_aus_open"
-}
-
-raw_matches = fetcher.get_market_data(sport_map[discipline])
+raw_matches = fetcher.get_market_data(discipline)
 analyzed_matches = []
 
 for m in raw_matches:
