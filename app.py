@@ -5,6 +5,7 @@ import xgboost as xgb
 import requests
 import sqlite3
 from datetime import datetime, timedelta
+import altair as alt
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(
@@ -14,10 +15,32 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# --- CYBERPUNKOWY / TERMINALOWY DESIGN CSS ---
+st.markdown("""
+    <style>
+    .main {
+        background-color: #0e1117;
+    }
+    .stMetric {
+        background-color: #161b22;
+        padding: 10px;
+        border-radius: 8px;
+        border: 1px solid #30363d;
+    }
+    .value-card {
+        background-color: #161b22;
+        border-left: 5px solid #238636;
+        padding: 15px;
+        border-radius: 6px;
+        margin-bottom: 10px;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
 ODDS_API_KEY = "f13c7d2c08077c2894cab879d0905234"
 API_SPORTS_KEY = "4d4ac6506b603ab89c0222ee1e32d6b7"
 
-# --- INICJALIZACJA BAZY DANYCH SQLITE ---
+# --- BAZA DANYCH SQLITE Z POLEM WYNIKU ---
 def init_db():
     conn = sqlite3.connect("bets_database.db", check_same_thread=False)
     cursor = conn.cursor()
@@ -31,7 +54,8 @@ def init_db():
             ai_prob REAL,
             edge REAL,
             stake REAL,
-            status TEXT
+            status TEXT,
+            profit REAL
         )
     ''')
     conn.commit()
@@ -39,7 +63,6 @@ def init_db():
 
 db_conn = init_db()
 
-# --- KLASA POBIERANIA DANYCH Z API ---
 class AutonomousDataFetcher:
     def __init__(self, odds_key):
         self.odds_key = odds_key
@@ -50,11 +73,11 @@ class AutonomousDataFetcher:
         to_time = (now + timedelta(hours=36)).strftime("%Y-%m-%dT%H:%M:%SZ")
         
         sport_keys = []
-        if discipline_name == "NBA Koszykówka":
+        if discipline_name == "🏀 NBA Koszykówka":
             sport_keys = ["basketball_nba"]
-        elif discipline_name == "NHL Hokej":
+        elif discipline_name == "🏒 NHL Hokej":
             sport_keys = ["icehockey_nhl"]
-        elif discipline_name == "Tenis (WTA/ATP)":
+        elif discipline_name == "🎾 Tenis (WTA/ATP)":
             try:
                 sports_res = requests.get(f"https://api.the-odds-api.com/v4/sports/?apiKey={self.odds_key}", timeout=10)
                 if sports_res.status_code == 200:
@@ -91,10 +114,8 @@ class AutonomousDataFetcher:
                                     elif o.get('name') == away:
                                         odds_away = o.get('price', 1.90)
 
-                        # Wyznaczamy prawdopodobieństwo rynkowe bazujące na kursach bukmachera
                         implied_home = (1 / odds_home) / ((1 / odds_home) + (1 / odds_away))
                         
-                        # Generujemy spójne wektory cech opierające się na wycenie rynkowej oraz zdroworozsądkowej logice
                         all_matches.append({
                             "id": match.get('id'),
                             "home": home,
@@ -116,7 +137,7 @@ class AutonomousDataFetcher:
                 
         return all_matches
 
-# --- TRENOWANIE ZAAWANSOWANEGO MODELU XGBOOST ---
+# --- MODEL XGBOOST ---
 @st.cache_resource
 def init_robust_xgboost():
     np.random.seed(42)
@@ -131,9 +152,7 @@ def init_robust_xgboost():
         'h2h': np.random.uniform(0, 1, n),
         'market_movement': np.random.uniform(-0.05, 0.05, n)
     })
-    # Logiczna reguła klasyfikacji: wygrywa ten, kto ma lepszą formę, Elo i bilans
     y = np.where((X['form_diff'] * 0.4 + X['elo_diff']/300 * 0.4 + np.random.normal(0, 0.1, n)) > 0, 1, 0)
-    
     model = xgb.XGBClassifier(n_estimators=150, max_depth=4, learning_rate=0.02, random_state=42)
     model.fit(X, y)
     return model
@@ -141,52 +160,24 @@ def init_robust_xgboost():
 model = init_robust_xgboost()
 fetcher = AutonomousDataFetcher(ODDS_API_KEY)
 
-# --- WAGI SPECYFICZNE DLA DYSCYPLIN ---
 sport_weights = {
-    "NBA Koszykówka": {
-        "Forma Ostatnich Meczów": 0.20,
-        "Przewaga Dom/Wyjazd": 0.15,
-        "Zmęczenie / Terminarz": 0.15,
-        "Siła Ataku": 0.18,
-        "Siła Obrony": 0.12,
-        "Ranking Elo": 0.10,
-        "H2H (Bezpośrednie)": 0.05,
-        "Ruch Kursów (Market)": 0.05
-    },
-    "NHL Hokej": {
-        "Forma Ostatnich Meczów": 0.15,
-        "Przewaga Dom/Wyjazd": 0.10,
-        "Zmęczenie / Terminarz": 0.18,
-        "Siła Ataku": 0.15,
-        "Siła Obrony": 0.20,
-        "Ranking Elo": 0.10,
-        "H2H (Bezpośrednie)": 0.07,
-        "Ruch Kursów (Market)": 0.05
-    },
-    "Tenis (WTA/ATP)": {
-        "Forma Ostatnich Meczów": 0.35,
-        "Przewaga Dom/Wyjazd": 0.00,
-        "Zmęczenie / Terminarz": 0.20,
-        "Siła Ataku": 0.10,
-        "Siła Obrony": 0.05,
-        "Ranking Elo": 0.15,
-        "H2H (Bezpośrednie)": 0.10,
-        "Ruch Kursów (Market)": 0.05
-    }
+    "🏀 NBA Koszykówka": {"Forma Ostatnich Meczów": 0.20, "Przewaga Dom/Wyjazd": 0.15, "Zmęczenie / Terminarz": 0.15, "Siła Ataku": 0.18, "Siła Obrony": 0.12, "Ranking Elo": 0.10, "H2H (Bezpośrednie)": 0.05, "Ruch Kursów (Market)": 0.05},
+    "🏒 NHL Hokej": {"Forma Ostatnich Meczów": 0.15, "Przewaga Dom/Wyjazd": 0.10, "Zmęczenie / Terminarz": 0.18, "Siła Ataku": 0.15, "Siła Obrony": 0.20, "Ranking Elo": 0.10, "H2H (Bezpośrednie)": 0.07, "Ruch Kursów (Market)": 0.05},
+    "🎾 Tenis (WTA/ATP)": {"Forma Ostatnich Meczów": 0.35, "Przewaga Dom/Wyjazd": 0.00, "Zmęczenie / Terminarz": 0.20, "Siła Ataku": 0.10, "Siła Obrony": 0.05, "Ranking Elo": 0.15, "H2H (Bezpośrednie)": 0.10, "Ruch Kursów (Market)": 0.05}
 }
 
 # --- PANEL BOCZNY ---
-st.title("🎯 Maksbet.app Autonomous")
+st.title("🎯 Maksbet.app")
 with st.sidebar:
-    st.header("⚙️ Ustawienia Systemu")
-    discipline = st.selectbox("Dyscyplina", ["NBA Koszykówka", "NHL Hokej", "Tenis (WTA/ATP)"])
-    bankroll = st.number_input("Bankroll (PLN)", min_value=100, value=1000, step=100)
+    st.header("⚙️ Konfiguracja Quant Engine")
+    discipline = st.selectbox("Dyscyplina", ["🏀 NBA Koszykówka", "🏒 NHL Hokej", "🎾 Tenis (WTA/ATP)"])
+    bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
+    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=1.0, max_value=15.0, value=3.0, step=0.5) / 100.0
     
     st.markdown("---")
     st.subheader(f"🧠 Wagi AI dla: {discipline}")
-    current_weights = sport_weights[discipline]
-    for feature_name, weight_val in current_weights.items():
+    for feature_name, weight_val in sport_weights[discipline].items():
         if weight_val > 0:
             st.text(f"{feature_name}: {int(weight_val*100)}%")
             st.progress(weight_val)
@@ -197,27 +188,20 @@ with st.sidebar:
     total_tracked = cursor.fetchone()[0]
     st.metric("Monitorowane zakłady", total_tracked)
 
-# --- POBIERANIE I ANALIZA MECZÓW ---
+# --- POBIERANIE I ANALIZA ---
 raw_matches = fetcher.get_market_data(discipline)
 analyzed_matches = []
 
 for m in raw_matches:
     features = pd.DataFrame([[
-        m['form_diff'],
-        m['home_away_adv'],
-        m['fatigue_diff'],
-        m['off_diff'],
-        m['def_diff'],
-        m['elo_diff'],
-        m['h2h'],
-        m['market_movement']
+        m['form_diff'], m['home_away_adv'], m['fatigue_diff'],
+        m['off_diff'], m['def_diff'], m['elo_diff'],
+        m['h2h'], m['market_movement']
     ]], columns=['form_diff', 'home_away_adv', 'fatigue_diff', 'off_diff', 'def_diff', 'elo_diff', 'h2h', 'market_movement'])
     
-    # Niezależna predykcja modelu
     ai_prob_home = float(model.predict_proba(features)[0][1])
-    # Skalujemy prawdopodobieństwo, aby zachować sensowność relacji faworyta do kursów
     market_implied = (1 / m['odds_home']) / ((1 / m['odds_home']) + (1 / m['odds_away']))
-    ai_prob_home = 0.6 * ai_prob_home + 0.4 * market_implied # Stabilizacja hybrydowa
+    ai_prob_home = 0.6 * ai_prob_home + 0.4 * market_implied
     ai_prob_away = 1.0 - ai_prob_home
     
     odds_home = m['odds_home']
@@ -241,17 +225,16 @@ for m in raw_matches:
     p = best_prob
     q = 1 - p
     kelly_f = (b * p - q) / b if b > 0 else 0
-    stake = max(0, bankroll * kelly_f * kelly_fraction) if best_edge > 0 else 0
+    stake = max(0, bankroll * kelly_f * kelly_fraction) if best_edge > min_edge_slider else 0
     
-    match_name = f"{m['home']} vs {m['away']}"
     match_id = m['id']
+    match_name = f"{m['home']} vs {m['away']}"
     
-    # Automatyczny zapis do bazy, gdy edge przekracza 3%
-    if best_edge > 0.03 and stake > 0:
+    if best_edge > min_edge_slider and stake > 0:
         cursor.execute("SELECT id FROM bets WHERE id = ?", (match_id,))
         if not cursor.fetchone():
-            cursor.execute("INSERT INTO bets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                           (match_id, datetime.now().strftime("%Y-%m-%d"), discipline, match_name, best_odds, best_prob, best_edge, stake, "Oczekujący"))
+            cursor.execute("INSERT INTO bets VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Oczekujący', 0.0)",
+                           (match_id, datetime.now().strftime("%Y-%m-%d"), discipline, match_name, best_odds, best_prob, best_edge, stake))
             db_conn.commit()
 
     m_copy = m.copy()
@@ -266,41 +249,72 @@ for m in raw_matches:
 
 analyzed_matches.sort(key=lambda x: x['edge'], reverse=True)
 
-# --- INTERFEJS UŻYTKOWNIKA ---
-tab1, tab2 = st.tabs(["🔥 Autonomiczne Value", "📁 Rejestr Bazy Danych"])
+# --- INTERFEJS GŁÓWNY (ZAKŁADKI) ---
+tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value", "📁 Rejestr & Statystyki", "📈 Krzywa Kapitału"])
 
 with tab1:
-    st.subheader(f"🤖 Silnik Kwantowy dla: {discipline}")
-    st.caption("Pełna autonomia: model analizuje statystyki i wyłapuje realne odchyłki rynkowe.")
+    st.subheader(f"🤖 Terminal Kwantowy: {discipline}")
+    st.caption(f"Filtrowanie aktywne: Minimalny Edge >= {int(min_edge_slider*100)}%")
     
     if not analyzed_matches:
-        st.warning("Brak aktywnych spotkań w API na najbliższe 24-36 godzin.")
+        st.warning("Brak spotkań spełniających kryteria przewagi rynkowej w najbliższych 36h.")
     else:
         for m in analyzed_matches:
             edge_pct = round(m['edge'] * 100, 1)
+            prob_pct = round(m['ai_prob'] * 100, 1)
+            
             with st.container():
-                col1, col2, col3 = st.columns([4, 2, 2])
-                with col1:
-                    st.markdown(f"### {m['home']} vs {m['away']}")
-                    st.caption(f"Data rozpoczęcia: {m.get('commence_time', 'Najbliższe godziny')}")
-                    
-                    st.markdown(f"🎯 **Typ AI (Na co postawić):** `{m['best_pick']}`")
-                    
-                    if m['edge'] > 0.03:
-                        st.success(f"🔥 VALUE (+{edge_pct}%) | Sugerowana Stawka: **{m['stake']} PLN**")
-                    else:
-                        st.info(f"Brak przewagi rynkowej ({edge_pct}%)")
-                with col2:
-                    st.metric("Szansa AI", f"{round(m['ai_prob'] * 100, 1)}%")
-                with col3:
-                    st.metric("Kurs", f"{m['odds']}")
+                st.markdown(f"""
+                    <div class="value-card">
+                        <h3>{m['home']} vs {m['away']}</h3>
+                        <p style="color: #8b949e; font-size: 12px;">Start: {m.get('commence_time', 'Najbliższe godziny')}</p>
+                        <p>🎯 <b>Typ AI:</b> <span style="color: #58a6ff;">{m['best_pick']}</span></p>
+                        <p>🔥 <b>Value:</b> <span style="color: #3fb950;">+{edge_pct}%</span> | 💰 <b>Stawka:</b> {m['stake']} PLN</p>
+                    </div>
+                """, unsafe_allow_html=True)
+                
+                # Wizualny pasek postępu szans AI
+                st.progress(m['ai_prob'], text=f"Rozkład szans AI dla typu: {prob_pct}%")
                 st.divider()
 
 with tab2:
     st.subheader("📋 Rejestr Monitorowanych Zakładów")
     df_bets = pd.read_sql("SELECT * FROM bets", db_conn)
+    
     if df_bets.empty:
         st.info("Brak zapisanych zakładów w bazie danych.")
     else:
+        # Statystyki zbiorcze (ROI, Winrate, Zysk)
+        total_bets = len(df_bets)
+        settled_bets = df_bets[df_bets['status'] != 'Oczekujący']
+        won_bets = df_bets[df_bets['status'] == 'Wygrany']
+        
+        winrate = (len(won_bets) / len(settled_bets) * 100) if len(settled_bets) > 0 else 0.0
+        total_profit = df_bets['profit'].sum()
+        
+        col_m1, col_m2, col_m3 = st.columns(3)
+        with col_m1:
+            st.metric("Skuteczność (Winrate)", f"{round(winrate, 1)}%")
+        with col_m2:
+            st.metric("Łączny Zysk/Strata", f"{round(total_profit, 2)} PLN")
+        with col_m3:
+            st.metric("Wszystkich Zakładów", total_bets)
+            
+        st.markdown("---")
         st.dataframe(df_bets, use_container_width=True)
-                        
+
+with tab3:
+    st.subheader("📈 Krzywa Wzrostu Kapitału")
+    df_bets = pd.read_sql("SELECT date, profit FROM bets", db_conn)
+    
+    if df_bets.empty or df_bets['profit'].sum() == 0:
+        st.info("Wykres wygeneruje się automatycznie po rozegraniu i rozliczeniu pierwszych meczów w bazie danych.")
+    else:
+        df_bets['cumulative_profit'] = df_bets['profit'].cumsum() + bankroll
+        chart = alt.Chart(df_bets).mark_line(strokeWidth=3, color='#3fb950').encode(
+            x='date:T',
+            y='cumulative_profit:Q',
+            tooltip=['date', 'cumulative_profit']
+        ).properties(height=350)
+        st.altair_chart(chart, use_container_width=True)
+    
