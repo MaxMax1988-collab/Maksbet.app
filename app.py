@@ -42,14 +42,12 @@ class AutonomousDataFetcher:
         from_time = now.strftime("%Y-%m-%dT%H:%M:%SZ")
         to_time = (now + timedelta(hours=36)).strftime("%Y-%m-%dT%H:%M:%SZ")
         
-        # Obsługa różnych dyscyplin w The Odds API
         sport_keys = []
         if discipline_name == "NBA Koszykówka":
             sport_keys = ["basketball_nba"]
         elif discipline_name == "NHL Hokej":
             sport_keys = ["icehockey_nhl"]
         elif discipline_name == "Tenis (WTA/ATP)":
-            # Automatyczne wykrywanie aktywnych turniejów tenisowych
             try:
                 sports_res = requests.get(f"https://api.the-odds-api.com/v4/sports/?apiKey={self.odds_key}", timeout=10)
                 if sports_res.status_code == 200:
@@ -129,15 +127,38 @@ def init_advanced_xgboost():
 model = init_advanced_xgboost()
 fetcher = AutonomousDataFetcher(ODDS_API_KEY)
 
-weights = {
-    "Forma Ostatnich Meczów": 0.18,
-    "Przewaga Dom/Wyjazd": 0.14,
-    "Zmęczenie / Terminarz": 0.12,
-    "Siła Ataku": 0.15,
-    "Siła Obrony": 0.15,
-    "Ranking Elo": 0.12,
-    "H2H (Bezpośrednie)": 0.08,
-    "Ruch Kursów (Market)": 0.06
+# --- DEDYKOWANE WAGI DLA KAŻDEJ DYSCYPLINY ---
+sport_weights = {
+    "NBA Koszykówka": {
+        "Forma Ostatnich Meczów": 0.20,
+        "Przewaga Dom/Wyjazd": 0.15,
+        "Zmęczenie / Terminarz": 0.15,
+        "Siła Ataku": 0.18,
+        "Siła Obrony": 0.12,
+        "Ranking Elo": 0.10,
+        "H2H (Bezpośrednie)": 0.05,
+        "Ruch Kursów (Market)": 0.05
+    },
+    "NHL Hokej": {
+        "Forma Ostatnich Meczów": 0.15,
+        "Przewaga Dom/Wyjazd": 0.10,
+        "Zmęczenie / Terminarz": 0.18,
+        "Siła Ataku": 0.15,
+        "Siła Obrony": 0.20,
+        "Ranking Elo": 0.10,
+        "H2H (Bezpośrednie)": 0.07,
+        "Ruch Kursów (Market)": 0.05
+    },
+    "Tenis (WTA/ATP)": {
+        "Forma Ostatnich Meczów": 0.35,
+        "Przewaga Dom/Wyjazd": 0.00,  # Brak gospodarza w tenisie (kort neutralny/turniejowy)
+        "Zmęczenie / Terminarz": 0.20,
+        "Siła Ataku": 0.10,
+        "Siła Obrony": 0.05,
+        "Ranking Elo": 0.15,
+        "H2H (Bezpośrednie)": 0.10,
+        "Ruch Kursów (Market)": 0.05
+    }
 }
 
 # --- PANEL BOCZNY ---
@@ -149,10 +170,13 @@ with st.sidebar:
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
     
     st.markdown("---")
-    st.subheader("🧠 Podgląd Wag AI (8 Czynników)")
-    for feature_name, weight_val in weights.items():
-        st.text(f"{feature_name}: {int(weight_val*100)}%")
-        st.progress(weight_val)
+    st.subheader(f"🧠 Wagi AI dla: {discipline}")
+    
+    current_weights = sport_weights[discipline]
+    for feature_name, weight_val in current_weights.items():
+        if weight_val > 0:
+            st.text(f"{feature_name}: {int(weight_val*100)}%")
+            st.progress(weight_val)
         
     st.markdown("---")
     cursor = db_conn.cursor()
@@ -239,4 +263,4 @@ with tab2:
         st.info("Brak zapisanych zakładów w bazie danych.")
     else:
         st.dataframe(df_bets, use_container_width=True)
-        
+    
