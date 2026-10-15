@@ -4,7 +4,7 @@ import numpy as np
 import xgboost as xgb
 import requests
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 
 st.set_page_config(page_title="Maksbet.app - Autonomous Quant Engine", page_icon="🎯", layout="wide")
 
@@ -38,7 +38,12 @@ class AutonomousDataFetcher:
         self.odds_key = odds_key
 
     def get_market_data(self, sport_key):
-        url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/?apiKey={self.odds_key}&regions=eu&markets=h2h"
+        # FILTR DATY: Ściągaj TYLKO mecze rozpoczynające się w ciągu najbliższych 36 godzin
+        now = datetime.utcnow()
+        from_time = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        to_time = (now + timedelta(hours=36)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        
+        url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/?apiKey={self.odds_key}&regions=eu&markets=h2h&commenceTimeFrom={from_time}&commenceTimeTo={to_time}"
         try:
             res = requests.get(url, timeout=10)
             if res.status_code == 200:
@@ -47,6 +52,7 @@ class AutonomousDataFetcher:
                 for match in data:
                     home = match.get('home_team')
                     away = match.get('away_team')
+                    commence_time = match.get('commence_time')
                     
                     odds_home, odds_away = 1.90, 1.90
                     bookmakers = match.get('bookmakers', [])
@@ -64,6 +70,7 @@ class AutonomousDataFetcher:
                         "id": match.get('id'),
                         "home": home,
                         "away": away,
+                        "commence_time": commence_time,
                         "odds_home": float(odds_home),
                         "odds_away": float(odds_away),
                         "form_h": 0.72, "form_a": 0.48,
@@ -184,15 +191,15 @@ for m in raw_matches:
 
 analyzed_matches.sort(key=lambda x: x['edge'], reverse=True)
 
-# --- INTERFEJS BEZ PRZYCISKÓW ---
-tab1, tab2 = st.tabs(["🔥 Autonomiczne Value", "📁 Rejestr Bazy Danych"])
+# --- INTERFEJS APLIKACJI ---
+tab1, tab2 = st.tabs(["🔥 Autonomiczne Value (Najbliższe 24h-36h)", "📁 Rejestr Bazy Danych"])
 
 with tab1:
     st.subheader(f"🤖 Analiza kwantowa dla: {discipline}")
-    st.caption("System automatycznie monitoruje rynek i rejestruje zakłady spełniające kryteria w bazie danych.")
+    st.caption("Filtrowanie aktywne: Pokazywane są wyłącznie mecze zaplanowane na najbliższe godziny.")
     
     if not analyzed_matches:
-        st.warning("Brak aktywnych spotkań w API na najbliższe godziny.")
+        st.warning("Brak aktywnych spotkań w API na najbliższe 24-36 godzin.")
     else:
         for m in analyzed_matches:
             edge_pct = round(m['edge'] * 100, 1)
@@ -200,6 +207,7 @@ with tab1:
                 col1, col2, col3 = st.columns([4, 2, 2])
                 with col1:
                     st.markdown(f"### {m['home']} vs {m['away']}")
+                    st.caption(f"Data rozpoczęcia: {m.get('commence_time', 'Najbliższe godziny')}")
                     if m['edge'] > 0.03:
                         st.success(f"🔥 VALUE (+{edge_pct}%) | Sugerowana Stawka: **{m['stake']} PLN**")
                     else:
@@ -211,7 +219,7 @@ with tab1:
                 st.divider()
 
 with tab2:
-    st.subheader("📋 Rejestr Monitorowanych Zakładów")
+    st.subheader("📋 Rejestr Bazy Danych")
     df_bets = pd.read_sql("SELECT * FROM bets", db_conn)
     if df_bets.empty:
         st.info("Brak zapisanych zakładów w bazie danych.")
