@@ -127,7 +127,6 @@ def init_advanced_xgboost():
 model = init_advanced_xgboost()
 fetcher = AutonomousDataFetcher(ODDS_API_KEY)
 
-# --- DEDYKOWANE WAGI DLA KAŻDEJ DYSCYPLINY ---
 sport_weights = {
     "NBA Koszykówka": {
         "Forma Ostatnich Meczów": 0.20,
@@ -151,7 +150,7 @@ sport_weights = {
     },
     "Tenis (WTA/ATP)": {
         "Forma Ostatnich Meczów": 0.35,
-        "Przewaga Dom/Wyjazd": 0.00,  # Brak gospodarza w tenisie (kort neutralny/turniejowy)
+        "Przewaga Dom/Wyjazd": 0.00,
         "Zmęczenie / Terminarz": 0.20,
         "Siła Ataku": 0.10,
         "Siła Obrony": 0.05,
@@ -241,11 +240,18 @@ with tab1:
     else:
         for m in analyzed_matches:
             edge_pct = round(m['edge'] * 100, 1)
+            # Jasne wskazanie faworyta do obstawienia (gospodarz przy szansie > 50%)
+            recommended_pick = m['home'] if m['ai_prob'] >= 0.5 else m['away']
+            
             with st.container():
                 col1, col2, col3 = st.columns([4, 2, 2])
                 with col1:
                     st.markdown(f"### {m['home']} vs {m['away']}")
                     st.caption(f"Data rozpoczęcia: {m.get('commence_time', 'Najbliższe godziny')}")
+                    
+                    # WYRAŹNA SUGESTIA TYPU
+                    st.markdown(markdown_text := f"🎯 **Typ AI (Na co postawić):** `{recommended_pick}`")
+                    
                     if m['edge'] > 0.03:
                         st.success(f"🔥 VALUE (+{edge_pct}%) | Sugerowana Stawka: **{m['stake']} PLN**")
                     else:
@@ -263,4 +269,4 @@ with tab2:
         st.info("Brak zapisanych zakładów w bazie danych.")
     else:
         st.dataframe(df_bets, use_container_width=True)
-    
+        
