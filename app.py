@@ -40,7 +40,7 @@ st.markdown("""
 ODDS_API_KEY = "f13c7d2c08077c2894cab879d0905234"
 API_SPORTS_KEY = "4d4ac6506b603ab89c0222ee1e32d6b7"
 
-# --- BAZA DANYCH SQLITE Z AUTO-MIGRACJĄ I ROZLICZANIEM ---
+# --- BAZA DANYCH SQLITE (CZYSTY START BEZ SYMULACJI) ---
 def init_db():
     conn = sqlite3.connect("bets_database.db", check_same_thread=False)
     cursor = conn.cursor()
@@ -66,31 +66,6 @@ def init_db():
     return conn
 
 db_conn = init_db()
-
-def auto_settle_bets(conn):
-    """Automatyczne rozliczanie zaległych zakładów w celach demonstracyjnych i ciągłości systemu"""
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, odds, stake FROM bets WHERE status = 'Oczekujący'")
-    pending = cursor.fetchall()
-    
-    for bet_id, odds, stake in pending:
-        # Symulacja rozstrzygnięcia na bazie losowania z uwzględnieniem prawdopodobieństwa kursu
-        # W docelowej wersji podpinane pod API wynikowe
-        np.random.seed(abs(hash(bet_id)) % (2**32))
-        is_won = np.random.choice([True, False], p=[0.52, 0.48]) # Lekka przewaga modelowa
-        
-        if is_won:
-            status = "Wygrany"
-            profit = round(stake * (odds - 1), 2)
-        else:
-            status = "Przegrany"
-            profit = round(-stake, 2)
-            
-        cursor.execute("UPDATE bets SET status = ?, profit = ? WHERE id = ?", (status, profit, bet_id))
-    conn.commit()
-
-# Uruchomienie auto-rozliczania przy starcie
-auto_settle_bets(db_conn)
 
 class AutonomousDataFetcher:
     def __init__(self, odds_key):
@@ -169,12 +144,9 @@ class AutonomousDataFetcher:
                 
         return all_matches
 
-# --- SAMOUCZĄCY SIĘ MODEL XGBOOST (ZASILANY HISTORIĄ Z BAZY) ---
+# --- SAMOUCZĄCY SIĘ MODEL XGBOOST ---
 @st.cache_resource
 def init_self_learning_xgboost():
-    # Pobieranie historycznych danych z bazy do ciągłego uczenia
-    df_history = pd.read_sql("SELECT odds, ai_prob, edge, profit FROM bets WHERE status != 'Oczekujący'", db_conn)
-    
     np.random.seed(42)
     n = 8000
     X = pd.DataFrame({
@@ -188,7 +160,6 @@ def init_self_learning_xgboost():
         'market_movement': np.random.normal(0, 0.01, n)
     })
     
-    # Konserwatywna funkcja celu zapobiegająca skrajnym wartościom
     score = (X['form_diff'] * 0.8 + X['elo_diff']/50 * 0.5 + np.random.normal(0, 0.3, n))
     y = np.where(score > 0, 1, 0)
     
@@ -212,7 +183,7 @@ with st.sidebar:
     discipline = st.selectbox("Dyscyplina", ["🏀 NBA Koszykówka", "🏒 NHL Hokej", "🎾 Tenis (WTA/ATP)"])
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
-    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=1.0, max_value=15.0, value=3.0, step=0.5) / 100.0
+    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=1.0, max_value=15.0, value=5.0, step=0.5) / 100.0
     
     st.markdown("---")
     st.subheader(f"🧠 Wagi AI dla: {discipline}")
@@ -239,8 +210,6 @@ for m in raw_matches:
     ]], columns=['form_diff', 'home_away_adv', 'fatigue_diff', 'off_diff', 'def_diff', 'elo_diff', 'h2h', 'market_movement'])
     
     ai_prob_home = float(model.predict_proba(features)[0][1])
-    
-    # Rygorystyczna kalibracja: bezpieczny przedział probabilistyczny (40% - 65%) dla równych par
     ai_prob_home = np.clip(ai_prob_home, 0.40, 0.65)
     ai_prob_away = 1.0 - ai_prob_home
     
@@ -294,7 +263,7 @@ tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value", "📁 Rejestr & Statystyki", 
 
 with tab1:
     st.subheader(f"🤖 Terminal Kwantowy: {discipline}")
-    st.caption(f"Filtrowanie aktywne: Minimalny Edge >= {int(min_edge_slider*100)}% (Autonomiczne uczenie aktywne)")
+    st.caption(f"Filtrowanie aktywne: Minimalny Edge >= {int(min_edge_slider*100)}%")
     
     if not analyzed_matches:
         st.warning("Brak spotkań spełniających kryteria przewagi rynkowej w najbliższych 36h.")
@@ -317,11 +286,19 @@ with tab1:
                 st.divider()
 
 with tab2:
-    st.subheader("📋 Rejestr Monitorowanych Zakładów (Auto-Settlement)")
+    st.subheader("📋 Rejestr Monitorowanych Zakładów")
+    
+    # Dodany przycisk czyszczenia bazy danych z poziomu aplikacji
+    if st.button("🗑️ Wyczyść historię bazy danych"):
+        cursor.execute("DELETE FROM bets")
+        db_conn.commit()
+        st.success("Wyczyszczono całą historię zakładów!")
+        st.rerun()
+
     df_bets = pd.read_sql("SELECT * FROM bets", db_conn)
     
     if df_bets.empty:
-        st.info("Brak zapisanych zakładów w bazie danych.")
+        st.info("Brak zapisanych zakładów w bazie danych. Baza jest czysta i gotowa na Twoje typy.")
     else:
         total_bets = len(df_bets)
         settled_bets = df_bets[df_bets['status'] != 'Oczekujący']
