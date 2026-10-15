@@ -58,11 +58,10 @@ def init_db():
             profit REAL
         )
     ''')
-    # Bezpieczne dodanie kolumny profit, jeśli jej brakuje w starszej bazie
     try:
         cursor.execute("ALTER TABLE bets ADD COLUMN profit REAL DEFAULT 0.0")
     except sqlite3.OperationalError:
-        pass # Kolumna już istnieje
+        pass
     conn.commit()
     return conn
 
@@ -119,7 +118,11 @@ class AutonomousDataFetcher:
                                     elif o.get('name') == away:
                                         odds_away = o.get('price', 1.90)
 
-                        implied_home = (1 / odds_home) / ((1 / odds_home) + (1 / odds_away))
+                        # Precyzyjne wyznaczenie prawdopodobieństwa rynkowego z uwzględnieniem marży (Vig)
+                        prob_raw_home = 1.0 / odds_home
+                        prob_raw_away = 1.0 / odds_away
+                        total_vig = prob_raw_home + prob_raw_away
+                        implied_home = prob_raw_home / total_vig
                         
                         all_matches.append({
                             "id": match.get('id'),
@@ -205,7 +208,11 @@ for m in raw_matches:
     ]], columns=['form_diff', 'home_away_adv', 'fatigue_diff', 'off_diff', 'def_diff', 'elo_diff', 'h2h', 'market_movement'])
     
     ai_prob_home = float(model.predict_proba(features)[0][1])
-    market_implied = (1 / m['odds_home']) / ((1 / m['odds_home']) + (1 / m['odds_away']))
+    
+    prob_raw_h = 1.0 / m['odds_home']
+    prob_raw_a = 1.0 / m['odds_away']
+    market_implied = prob_raw_h / (prob_raw_h + prob_raw_a)
+    
     ai_prob_home = 0.6 * ai_prob_home + 0.4 * market_implied
     ai_prob_away = 1.0 - ai_prob_home
     
@@ -320,3 +327,4 @@ with tab3:
             tooltip=['date', 'cumulative_profit']
         ).properties(height=350)
         st.altair_chart(chart, use_container_width=True)
+        
