@@ -7,6 +7,7 @@ import sqlite3
 from datetime import datetime, timedelta
 import altair as alt
 import io
+import os
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(
@@ -207,6 +208,16 @@ with st.sidebar:
     cursor.execute("SELECT COUNT(*) FROM bets")
     total_tracked = cursor.fetchone()[0]
     st.metric("Monitorowane zakłady", total_tracked)
+    
+    # Przycisk pobierania backupu bazy SQLite (.db) w panelu bocznym
+    if os.path.exists("bets_database.db"):
+        with open("bets_database.db", "rb") as f:
+            st.download_button(
+                label="📥 Pobierz Backup Bazy (.db)",
+                data=f,
+                file_name=f"bets_backup_{datetime.now().strftime('%Y%m%d')}.db",
+                mime="application/x-sqlite3"
+            )
 
 # --- POBIERANIE I ANALIZA ---
 raw_matches = fetcher.get_market_data(discipline)
@@ -277,7 +288,7 @@ for m in raw_matches:
 analyzed_matches.sort(key=lambda x: x['edge'], reverse=True)
 
 # --- INTERFEJS GŁÓWNY (ZAKŁADKI) ---
-tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value", "📁 Rejestr & Dashboard ROI", "📈 Krzywa Kapitału"])
+tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value", "📁 Rejestr, ROI & Heatmapa", "📈 Krzywa Kapitału"])
 
 with tab1:
     st.subheader(f"🤖 Terminal Kwantowy: {discipline}")
@@ -325,7 +336,7 @@ with tab2:
         report_buffer.write(df_export.to_string() if not df_export.empty else "Brak zakładów w bazie.")
         
         st.download_button(
-            label="📄 Pobierz Raport Kwantowy (TXT/PDF)",
+            label="📄 Pobierz Raport Kwantowy (TXT)",
             data=report_buffer.getvalue(),
             file_name=f"Maksbet_Raport_{datetime.now().strftime('%Y%m%d')}.txt",
             mime="text/plain"
@@ -357,6 +368,30 @@ with tab2:
             st.metric("Wszystkich Zakładów", total_bets)
             
         st.markdown("---")
+        
+        # --- HEATMAPA / PROFIL SKUTECZNOŚCI WEDŁUG KURSÓW ---
+        st.markdown("### 📊 Heatmapa Skuteczności i Zysku według Przedziałów Kursowych")
+        if not settled_bets.empty:
+            def categorize_odds(odds):
+                if odds < 1.50: return "1.00 - 1.49"
+                elif odds < 1.80: return "1.50 - 1.79"
+                elif odds < 2.10: return "1.80 - 2.09"
+                elif odds < 2.50: return "2.10 - 2.49"
+                else: return "2.50+"
+                
+            settled_bets['odds_range'] = settled_bets['odds'].apply(categorize_odds)
+            range_summary = settled_bets.groupby('odds_range').agg(
+                Liczba=('id', 'count'),
+                Zysk=('profit', 'sum'),
+                Postawiono=('stake', 'sum')
+            ).reset_index()
+            range_summary['ROI (%)'] = np.where(range_summary['Postawiono'] > 0, 
+                                                round((range_summary['Zysk'] / range_summary['Postawiono']) * 100, 2), 0.0)
+            st.dataframe(range_summary, use_container_width=True)
+        else:
+            st.info("Heatmapa kursowa uzupełni się po rozliczeniu pierwszych zakładów.")
+
+        st.markdown("---")
         st.dataframe(df_bets, use_container_width=True)
 
 with tab3:
@@ -364,7 +399,7 @@ with tab3:
     df_bets = pd.read_sql("SELECT date, profit FROM bets WHERE status != 'Oczekujący'", db_conn)
     
     if df_bets.empty or 'profit' not in df_bets.columns or len(df_bets) == 0:
-        st.info("Wykres wygeneruje się automatycznie po rozegraniu i rozliczeniu pierwszych meczów w bazie danych.")
+        st.info("Wykres wygeneruje się automatycznie po rozegraniu i rozliczeniu pierwszych zakładów w bazie danych.")
     else:
         df_bets['cumulative_profit'] = df_bets['profit'].cumsum() + bankroll
         chart = alt.Chart(df_bets).mark_line(strokeWidth=3, color='#3fb950').encode(
@@ -373,4 +408,4 @@ with tab3:
             tooltip=['date', 'cumulative_profit']
         ).properties(height=350)
         st.altair_chart(chart, use_container_width=True)
-                    
+                        
