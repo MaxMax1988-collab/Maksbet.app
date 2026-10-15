@@ -65,13 +65,24 @@ def init_db():
             edge REAL,
             stake REAL,
             status TEXT,
-            profit REAL
+            profit REAL,
+            home_team TEXT,
+            away_team TEXT,
+            best_pick TEXT
         )
     ''')
-    try:
-        cursor.execute("ALTER TABLE bets ADD COLUMN profit REAL DEFAULT 0.0")
-    except sqlite3.OperationalError:
-        pass
+    # Sprawdzanie i ewentualne dodawanie nowych kolumn dla starszych wersji bazy
+    for col_def in [
+        ("profit", "REAL DEFAULT 0.0"),
+        ("home_team", "TEXT"),
+        ("away_team", "TEXT"),
+        ("best_pick", "TEXT")
+    ]:
+        try:
+            cursor.execute(f"ALTER TABLE bets ADD COLUMN {col_def[0]} {col_def[1]}")
+        except sqlite3.OperationalError:
+            pass
+            
     conn.commit()
     return conn
 
@@ -156,6 +167,60 @@ class AutonomousDataFetcher:
                 
         return all_matches
 
+    def auto_settle_bets(self, conn):
+        """Automatycznie pobiera wyniki z API i rozlicza oczekujące zakłady w bazie."""
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, sport, odds, stake, best_pick, home_team, away_team FROM bets WHERE status = 'Oczekujący'")
+        pending_bets = cursor.fetchall()
+        
+        if not pending_bets:
+            return
+
+        # Mapowanie dyscyplin na klucze API wyników
+        sport_key_map = {
+            "🏀 NBA Koszykówka": "basketball_nba",
+            "🏒 NHL Hokej": "icehockey_nhl",
+            "🎾 Tenis (WTA/ATP)": "tennis_atp_us_open"
+        }
+
+        for bet in pending_bets:
+            bet_id, sport, odds, stake, best_pick, home_team, away_team = bet
+            s_key = sport_key_map.get(sport, "icehockey_nhl")
+            
+            scores_url = f"https://api.the-odds-api.com/v4/sports/{s_key}/scores/?apiKey={self.odds_key}&daysFrom=2"
+            try:
+                res = requests.get(scores_url, timeout=10)
+                if res.status_code == 200:
+                    matches_data = res.json()
+                    for match in matches_data:
+                        if match.get('id') == bet_id and match.get('completed'):
+                            scores = match.get('scores', [])
+                            if scores:
+                                # Ustalenie zwycięzcy na podstawie wyników punktowych
+                                winner = None
+                                max_score = -1
+                                for s in scores:
+                                    sc_val = float(s.get('score', 0))
+                                    if sc_val > max_score:
+                                        max_score = sc_val
+                                        winner = s.get('name')
+                                        
+                                if winner:
+                                    if winner == best_pick:
+                                        status = "Wygrany"
+                                        profit = round(stake * (odds - 1), 2)
+                                    else:
+                                        status = "Przegrany"
+                                        profit = round(-stake, 2)
+                                        
+                                    cursor.execute(
+                                        "UPDATE bets SET status = ?, profit = ? WHERE id = ?",
+                                        (status, profit, bet_id)
+                                    )
+                                    conn.commit()
+            except Exception:
+                continue
+
 @st.cache_resource
 def init_self_learning_xgboost():
     np.random.seed(42)
@@ -180,6 +245,9 @@ def init_self_learning_xgboost():
 
 model = init_self_learning_xgboost()
 fetcher = AutonomousDataFetcher(ODDS_API_KEY)
+
+# Uruchomienie automatycznego rozliczania zakładów w tle przy każdym załadowaniu aplikacji
+fetcher.auto_settle_bets(db_conn)
 
 sport_weights = {
     "🏀 NBA Koszykówka": {"Forma Ostatnich Meczów": 0.20, "Przewaga Dom/Wyjazd": 0.15, "Zmęczenie / Terminarz": 0.15, "Siła Ataku": 0.18, "Siła Obrony": 0.12, "Ranking Elo": 0.10, "H2H (Bezpośrednie)": 0.05, "Ruch Kursów (Market)": 0.05},
@@ -209,7 +277,6 @@ with st.sidebar:
     total_tracked = cursor.fetchone()[0]
     st.metric("Monitorowane zakłady", total_tracked)
     
-    # Przycisk pobierania backupu bazy SQLite (.db) w panelu bocznym
     if os.path.exists("bets_database.db"):
         with open("bets_database.db", "rb") as f:
             st.download_button(
@@ -270,8 +337,10 @@ for m in raw_matches:
     if best_edge > min_edge_slider and stake > 0:
         cursor.execute("SELECT id FROM bets WHERE id = ?", (match_id,))
         if not cursor.fetchone():
-            cursor.execute("INSERT INTO bets VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Oczekujący', 0.0)",
-                           (match_id, datetime.now().strftime("%Y-%m-%d"), discipline, match_name, best_odds, best_prob, best_edge, stake))
+            cursor.execute(
+                "INSERT INTO bets VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Oczekujący', 0.0, ?, ?, ?)",
+                (match_id, datetime.now().strftime("%Y-%m-%d"), discipline, match_name, best_odds, best_prob, best_edge, stake, m['home'], m['away'], best_pick)
+            )
             db_conn.commit()
 
     m_copy = m.copy()
@@ -292,7 +361,7 @@ tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value", "📁 Rejestr, ROI & Heatmapa
 
 with tab1:
     st.subheader(f"🤖 Terminal Kwantowy: {discipline}")
-    st.caption(f"Filtrowanie aktywne: Minimalny Edge >= {int(min_edge_slider*100)}% + Detekcja Steam Move")
+    st.caption(f"Filtrowanie aktywne: Minimalny Edge >= {int(min_edge_slider*100)}% + Detekcja Steam Move (Auto-Settlement Active)")
     
     if not analyzed_matches:
         st.warning("Brak spotkań spełniających kryteria przewagi rynkowej w najbliższych 36h.")
@@ -316,7 +385,7 @@ with tab1:
                 st.divider()
 
 with tab2:
-    st.subheader("📁 Rejestr Monitorowanych Zakładów & Dashboard Analityczny")
+    st.subheader("📁 Autonomiczny Rejestr Zakładów & Dashboard ROI")
     
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
@@ -345,7 +414,7 @@ with tab2:
     df_bets = pd.read_sql("SELECT * FROM bets", db_conn)
     
     if df_bets.empty:
-        st.info("Brak zapisanych zakładów w bazie danych. Baza jest czysta i gotowa na Twoje typy.")
+        st.info("Brak zapisanych zakładów w bazie danych. Baza jest czysta i gotowa na autonomiczne typy.")
     else:
         total_bets = len(df_bets)
         settled_bets = df_bets[df_bets['status'] != 'Oczekujący']
@@ -369,7 +438,6 @@ with tab2:
             
         st.markdown("---")
         
-        # --- HEATMAPA / PROFIL SKUTECZNOŚCI WEDŁUG KURSÓW ---
         st.markdown("### 📊 Heatmapa Skuteczności i Zysku według Przedziałów Kursowych")
         if not settled_bets.empty:
             def categorize_odds(odds):
@@ -389,7 +457,7 @@ with tab2:
                                                 round((range_summary['Zysk'] / range_summary['Postawiono']) * 100, 2), 0.0)
             st.dataframe(range_summary, use_container_width=True)
         else:
-            st.info("Heatmapa kursowa uzupełni się po rozliczeniu pierwszych zakładów.")
+            st.info("Heatmapa kursowa uzupełni się automatycznie po zakończeniu i rozliczeniu pierwszych meczów przez API.")
 
         st.markdown("---")
         st.dataframe(df_bets, use_container_width=True)
@@ -399,7 +467,7 @@ with tab3:
     df_bets = pd.read_sql("SELECT date, profit FROM bets WHERE status != 'Oczekujący'", db_conn)
     
     if df_bets.empty or 'profit' not in df_bets.columns or len(df_bets) == 0:
-        st.info("Wykres wygeneruje się automatycznie po rozegraniu i rozliczeniu pierwszych zakładów w bazie danych.")
+        st.info("Wykres wygeneruje się automatycznie po rozegraniu i rozliczeniu pierwszych meczów w tle przez system.")
     else:
         df_bets['cumulative_profit'] = df_bets['profit'].cumsum() + bankroll
         chart = alt.Chart(df_bets).mark_line(strokeWidth=3, color='#3fb950').encode(
@@ -408,4 +476,4 @@ with tab3:
             tooltip=['date', 'cumulative_profit']
         ).properties(height=350)
         st.altair_chart(chart, use_container_width=True)
-                        
+            
