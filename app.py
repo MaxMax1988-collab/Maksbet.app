@@ -63,9 +63,12 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- KONFIGURACJA BIGBALLS DATA API ---
+# --- KONFIGURACJA KLUCZY API ---
 BIGBALLS_API_KEY = "bbs_live_00000Q0jccm1qVf25ZzckXWCMZvjhspTLK7TNLotzsNCs1cp"
 BIGBALLS_BASE_URL = "https://api.bigballsdata.com/v1"
+
+SHARP_API_KEY = "sk_live_VUKTrWF7FdPH6imMMiWALe"
+SHARP_BASE_URL = "https://api.sharpapi.io/api/v1"
 
 # --- BAZA DANYCH SQLITE ---
 def init_db():
@@ -154,34 +157,65 @@ def get_adaptive_weights(discipline_name):
             "H2H (Bezpośrednie)": 0.10
         }
 
-# --- CACHOWANE ZAPYTANIA DO BIGBALLS DATA API ---
+# --- HYBRYDOWY SILNIK POBIERANIA DANYCH (BIGBALLS + SHARPAPI) ---
 @st.cache_data(ttl=1800, show_spinner=False)
-def fetch_bigballs_cached(discipline_name, api_key):
-    headers = {
-        "Authorization": f"Bearer {api_key}",
+def fetch_hybrid_market_data(discipline_name):
+    headers_bbs = {
+        "Authorization": f"Bearer {BIGBALLS_API_KEY}",
+        "Accept": "application/json"
+    }
+    headers_sharp = {
+        "X-API-Key": SHARP_API_KEY,
         "Accept": "application/json"
     }
     
-    # Przesyłamy elastyczne parametry sportu
-    if discipline_name == "🏀 NBA Koszykówka":
-        params = {"sport": "basketball", "limit": 50}
-    else:
-        params = {"sport": "ice_hockey", "limit": 50}
-    
-    url = f"{BIGBALLS_BASE_URL}/matches"
-    all_matches = []
-    
+    # 1. Pobieramy realne kursy bukmacherskie z SharpAPI
+    odds_map = {}
     try:
-        res = requests.get(url, headers=headers, params=params, timeout=10)
-        if res.status_code == 200:
-            data = res.json().get("data", [])
+        res_sharp = requests.get(f"{SHARP_BASE_URL}/odds", headers=headers_sharp, params={"limit": 50}, timeout=10)
+        if res_sharp.status_code == 200:
+            odds_data = res_sharp.json().get("data", [])
+            for item in odds_data:
+                h_name = str(item.get('home_team', '')).lower()
+                a_name = str(item.get('away_team', '')).lower()
+                if h_name and a_name:
+                    odds_map[(h_name, a_name)] = {
+                        "odds_home": float(item.get('odds_home', 1.90)),
+                        "odds_away": float(item.get('odds_away', 1.90))
+                    }
+    except Exception:
+        pass
+
+    # 2. Pobieramy harmonogram i statystyki z BigBalls Data API
+    if discipline_name == "🏀 NBA Koszykówka":
+        params_bbs = {"sport": "basketball", "limit": 50}
+    else:
+        params_bbs = {"sport": "ice_hockey", "limit": 50}
+        
+    all_matches = []
+    try:
+        res_bbs = requests.get(f"{BIGBALLS_BASE_URL}/matches", headers=headers_bbs, params=params_bbs, timeout=10)
+        if res_bbs.status_code == 200:
+            data = res_bbs.json().get("data", [])
             for match in data:
-                home = match.get('home_team') or match.get('home') or 'Home'
-                away = match.get('away_team') or match.get('away') or 'Away'
+                # Bezpieczne parsowanie nazw drużyn (odporne na obiekty słownikowe JSON)
+                raw_home = match.get('home_team') or match.get('home') or 'Home'
+                home = raw_home.get('name') or raw_home.get('short_name') if isinstance(raw_home, dict) else str(raw_home)
+                
+                raw_away = match.get('away_team') or match.get('away') or 'Away'
+                away = raw_away.get('name') or raw_away.get('short_name') if isinstance(raw_away, dict) else str(raw_away)
+                
                 commence_time = match.get('commence_time') or match.get('start_time') or datetime.now(timezone.utc).isoformat()
                 
-                odds_home = float(match.get('odds_home', 1.95))
-                odds_away = float(match.get('odds_away', 1.85))
+                # Dopasowanie kursów z SharpAPI lub inteligentny fallback
+                key = (home.lower(), away.lower())
+                if key in odds_map:
+                    odds_home = odds_map[key]["odds_home"]
+                    odds_away = odds_map[key]["odds_away"]
+                else:
+                    odds_home = float(match.get('odds_home', 1.92))
+                    odds_away = float(match.get('odds_away', 1.88))
+                
                 spread_home = match.get('spread_home', 0.0)
                 spread_away = match.get('spread_away', 0.0)
                 
@@ -208,7 +242,7 @@ def fetch_bigballs_cached(discipline_name, api_key):
                     "h2h": implied_home
                 })
     except Exception as e:
-        st.error(f"Błąd API BigBalls Data: {e}")
+        st.error(f"Błąd hybrydowego pobierania danych: {e}")
         
     return all_matches
 
@@ -217,7 +251,7 @@ class AutonomousDataFetcher:
         self.api_key = api_key
 
     def get_market_data(self, discipline_name):
-        return fetch_bigballs_cached(discipline_name, self.api_key)
+        return fetch_hybrid_market_data(discipline_name)
 
     def auto_settle_bets(self, conn):
         cursor = conn.cursor()
@@ -398,7 +432,7 @@ tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value", "📁 Rejestr, ROI & Heatmapa
 
 with tab1:
     st.subheader(f"Terminal Analityczny: {discipline}")
-    st.caption(f"Filtrowanie aktywne: Minimalny Edge >= {int(min_edge_slider*100)}% + BigBalls Data Live Feeds")
+    st.caption(f"Filtrowanie aktywne: Minimalny Edge >= {int(min_edge_slider*100)}% + Hybrid Feeds (BigBalls + SharpAPI)")
     
     if not analyzed_matches:
         st.warning("Brak spotkań spełniających kryteria przewagi rynkowej w najbliższych godzinach lub oczekiwanie na odświeżenie danych.")
@@ -512,4 +546,3 @@ with tab3:
             tooltip=['date', 'cumulative_profit']
         ).properties(height=350)
         st.altair_chart(chart, use_container_width=True)
-        
