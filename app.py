@@ -369,7 +369,6 @@ for m in raw_matches:
     
     match_id = m['id']
     
-    # Tworzenie dopisku o handicapie jeśli dostępny
     pick_label = best_pick
     if spread_val is not None:
         sign = "+" if spread_val > 0 else ""
@@ -517,4 +516,4 @@ with tab3:
             y='cumulative_profit:Q',
             tooltip=['date', 'cumulative_profit']
         ).properties(height=350)
-        st.altair_chart(chart, use_container_width
+        st.altair_chart(chart, use_container_width=True)
