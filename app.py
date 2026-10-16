@@ -17,7 +17,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- NOWOCZESNY DESIGN CSS (W Stylu Premium Mobile UI) ---
+# --- NOWOCZESNY DESIGN CSS ---
 st.markdown("""
     <style>
     .main {
@@ -101,7 +101,7 @@ def init_db():
 
 db_conn = init_db()
 
-# --- OPTYMALIZACJA: CACHING ZAPYTAN KURSOWYCH ---
+# --- CACHOWANE ZAPYTANIA API (Z OBSŁUGĄ SPREADS/HANDICAP DLA NBA) ---
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_odds_cached(discipline_name, odds_key):
     now = datetime.utcnow()
@@ -109,8 +109,11 @@ def fetch_odds_cached(discipline_name, odds_key):
     to_time = (now + timedelta(hours=36)).strftime("%Y-%m-%dT%H:%M:%SZ")
     
     sport_keys = []
+    markets_param = "h2h"
+    
     if discipline_name == "🏀 NBA Koszykówka":
         sport_keys = ["basketball_nba"]
+        markets_param = "h2h,spreads"
     elif discipline_name == "🏒 NHL Hokej":
         sport_keys = ["icehockey_nhl"]
     elif discipline_name == "🎾 Tenis (WTA/ATP)":
@@ -128,7 +131,7 @@ def fetch_odds_cached(discipline_name, odds_key):
     all_matches = []
     
     for key in sport_keys:
-        url = f"https://api.the-odds-api.com/v4/sports/{key}/odds/?apiKey={odds_key}&regions=eu&markets=h2h&commenceTimeFrom={from_time}&commenceTimeTo={to_time}"
+        url = f"https://api.the-odds-api.com/v4/sports/{key}/odds/?apiKey={odds_key}&regions=eu&markets={markets_param}&commenceTimeFrom={from_time}&commenceTimeTo={to_time}"
         try:
             res = requests.get(url, timeout=10)
             if res.status_code == 200:
@@ -139,16 +142,26 @@ def fetch_odds_cached(discipline_name, odds_key):
                     commence_time = match.get('commence_time')
                     
                     odds_home, odds_away = 1.90, 1.90
+                    spread_home, spread_away = None, None
+                    spread_odds_home, spread_odds_away = 1.90, 1.90
+                    
                     bookmakers = match.get('bookmakers', [])
                     if bookmakers:
-                        markets = bookmakers[0].get('markets', [])
-                        if markets:
-                            outcomes = markets[0].get('outcomes', [])
-                            for o in outcomes:
-                                if o.get('name') == home:
-                                    odds_home = o.get('price', 1.90)
-                                elif o.get('name') == away:
-                                    odds_away = o.get('price', 1.90)
+                        for m_type in bookmakers[0].get('markets', []):
+                            if m_type.get('key') == 'h2h':
+                                for o in m_type.get('outcomes', []):
+                                    if o.get('name') == home:
+                                        odds_home = o.get('price', 1.90)
+                                    elif o.get('name') == away:
+                                        odds_away = o.get('price', 1.90)
+                            elif m_type.get('key') == 'spreads':
+                                for o in m_type.get('outcomes', []):
+                                    if o.get('name') == home:
+                                        spread_home = o.get('point', 0.0)
+                                        spread_odds_home = o.get('price', 1.90)
+                                    elif o.get('name') == away:
+                                        spread_away = o.get('point', 0.0)
+                                        spread_odds_away = o.get('price', 1.90)
 
                     prob_raw_home = 1.0 / odds_home
                     prob_raw_away = 1.0 / odds_away
@@ -162,6 +175,10 @@ def fetch_odds_cached(discipline_name, odds_key):
                         "commence_time": commence_time,
                         "odds_home": float(odds_home),
                         "odds_away": float(odds_away),
+                        "spread_home": spread_home,
+                        "spread_away": spread_away,
+                        "spread_odds_home": spread_odds_home,
+                        "spread_odds_away": spread_odds_away,
                         "form_diff": (implied_home - 0.5),
                         "home_away_adv": 0.05,
                         "fatigue_diff": 0.0,
@@ -183,7 +200,6 @@ class AutonomousDataFetcher:
         return fetch_odds_cached(discipline_name, self.odds_key)
 
     def auto_settle_bets(self, conn):
-        """Bezpośrednie pobieranie i rozliczanie meczów z pominięciem starego cache wyników."""
         cursor = conn.cursor()
         cursor.execute("SELECT id, sport, odds, stake, best_pick, home_team, away_team FROM bets WHERE status = 'Oczekujący'")
         pending_bets = cursor.fetchall()
@@ -223,7 +239,6 @@ class AutonomousDataFetcher:
                                         
                                 if winner:
                                     is_won = (best_pick.lower() in winner.lower()) or (winner.lower() in best_pick.lower())
-                                    
                                     status = "Wygrany" if is_won else "Przegrany"
                                     profit = round(stake * (odds - 1), 2) if is_won else round(-stake, 2)
                                         
@@ -259,7 +274,6 @@ def init_self_learning_xgboost():
 model = init_self_learning_xgboost()
 fetcher = AutonomousDataFetcher(ODDS_API_KEY)
 
-# Uruchomienie automatycznego rozliczania przy starcie
 fetcher.auto_settle_bets(db_conn)
 
 sport_weights = {
@@ -339,11 +353,13 @@ for m in raw_matches:
         best_prob = ai_prob_home
         best_odds = odds_home
         best_edge = edge_home
+        spread_val = m['spread_home']
     else:
         best_pick = m['away']
         best_prob = ai_prob_away
         best_odds = odds_away
         best_edge = edge_away
+        spread_val = m['spread_away']
     
     b = best_odds - 1
     p = best_prob
@@ -352,6 +368,13 @@ for m in raw_matches:
     stake = max(0, bankroll * kelly_f * kelly_fraction) if best_edge > min_edge_slider else 0
     
     match_id = m['id']
+    
+    # Tworzenie dopisku o handicapie jeśli dostępny
+    pick_label = best_pick
+    if spread_val is not None:
+        sign = "+" if spread_val > 0 else ""
+        pick_label = f"{best_pick} ({sign}{spread_val})"
+
     match_name = f"{m['home']} vs {m['away']}"
     
     if best_edge > min_edge_slider and stake > 0:
@@ -359,13 +382,13 @@ for m in raw_matches:
         if not cursor.fetchone():
             cursor.execute(
                 "INSERT INTO bets VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Oczekujący', 0.0, ?, ?, ?)",
-                (match_id, datetime.now().strftime("%Y-%m-%d"), discipline, match_name, best_odds, best_prob, best_edge, stake, m['home'], m['away'], best_pick)
+                (match_id, datetime.now().strftime("%Y-%m-%d"), discipline, match_name, best_odds, best_prob, best_edge, stake, m['home'], m['away'], pick_label)
             )
             db_conn.commit()
 
     m_copy = m.copy()
     m_copy.update({
-        "best_pick": best_pick,
+        "best_pick": pick_label,
         "ai_prob": best_prob,
         "odds": best_odds,
         "edge": best_edge,
@@ -375,13 +398,13 @@ for m in raw_matches:
 
 analyzed_matches.sort(key=lambda x: x['edge'], reverse=True)
 
-# --- INTERFEJS GŁÓWNY (ZAKŁADKI) ---
+# --- INTERFEJS GŁÓWNY ---
 st.markdown("## ⚡ Dashboard Kwantowy")
 tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value", "📁 Rejestr, ROI & Heatmapa", "📈 Krzywa Kapitału"])
 
 with tab1:
     st.subheader(f"Terminal Analityczny: {discipline}")
-    st.caption(f"Filtrowanie aktywne: Minimalny Edge >= {int(min_edge_slider*100)}% + Auto-Settlement Ready")
+    st.caption(f"Filtrowanie aktywne: Minimalny Edge >= {int(min_edge_slider*100)}% + Handicap/Spread Engine")
     
     if not analyzed_matches:
         st.warning("Brak spotkań spełniających kryteria przewagi rynkowej w najbliższych 36h.")
@@ -395,7 +418,7 @@ with tab1:
                     <div class="value-card">
                         <h3>{m['home']} vs {m['away']}</h3>
                         <p style="color: #94a3b8; font-size: 12px;">Start: {m.get('commence_time', 'Najbliższe godziny')}</p>
-                        <p>🎯 <b>Typ AI:</b> <span style="color: #60a5fa;">{m['best_pick']}</span></p>
+                        <p>🎯 <b>Typ AI / Handicap:</b> <span style="color: #60a5fa;">{m['best_pick']}</span></p>
                         <p>🔥 <b>Value:</b> <span style="color: #34d399;">+{edge_pct}%</span> | 💰 <b>Stawka:</b> {m['stake']} PLN</p>
                     </div>
                 """, unsafe_allow_html=True)
@@ -494,4 +517,4 @@ with tab3:
             y='cumulative_profit:Q',
             tooltip=['date', 'cumulative_profit']
         ).properties(height=350)
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart, use_container_width
