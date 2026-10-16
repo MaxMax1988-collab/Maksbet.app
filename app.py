@@ -4,7 +4,7 @@ import numpy as np
 import xgboost as xgb
 import requests
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import altair as alt
 import io
 import os
@@ -101,6 +101,17 @@ def init_db():
 
 db_conn = init_db()
 
+# --- POMOCNIK DO KONWERSJI CZASU NA POLSKI (CET/CEST) ---
+def format_match_time(commence_time_str):
+    try:
+        # Parsowanie czasu UTC z API
+        dt_utc = datetime.strptime(commence_time_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        # Przesunięcie dla Polski (w październiku obowiązuje UTC+2)
+        dt_pl = dt_utc + timedelta(hours=2)
+        return dt_pl.strftime("%d.%m, %H:%M")
+    except Exception:
+        return commence_time_str
+
 # --- ADAPTIVE TEMPORAL WEIGHTING ENGINE ---
 def get_adaptive_weights(discipline_name):
     current_month = datetime.now().month
@@ -141,7 +152,7 @@ def get_adaptive_weights(discipline_name):
             "Ranking Elo": 0.08,
             "H2H (Bezpośrednie)": 0.04
         }
-    else:  # Tenis
+    else:
         return {
             "Forma Ostatnich Meczów": 0.40,
             "Przewaga Dom/Wyjazd": 0.00,
@@ -152,12 +163,13 @@ def get_adaptive_weights(discipline_name):
             "H2H (Bezpośrednie)": 0.10
         }
 
-# --- CACHOWANE ZAPYTANIA API ---
+# --- CACHOWANE ZAPYTANIA API (BEZPIECZNE OKNO CZASOWE) ---
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_odds_cached(discipline_name, odds_key):
-    now = datetime.utcnow()
-    from_time = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    to_time = (now + timedelta(hours=36)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_utc = datetime.now(timezone.utc)
+    from_time = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Pobieramy dokładne okno najbliższych 48 godzin, aby uniknąć śmieciowych danych
+    to_time = (now_utc + timedelta(hours=48)).strftime("%Y-%m-%dT%H:%M:%SZ")
     
     sport_keys = []
     markets_param = "h2h"
@@ -447,7 +459,8 @@ for m in raw_matches:
         "ai_prob": best_prob,
         "odds": best_odds,
         "edge": best_edge,
-        "stake": round(stake, 2)
+        "stake": round(stake, 2),
+        "local_time": format_match_time(m.get('commence_time', ''))
     })
     analyzed_matches.append(m_copy)
 
@@ -459,10 +472,10 @@ tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value", "📁 Rejestr, ROI & Heatmapa
 
 with tab1:
     st.subheader(f"Terminal Analityczny: {discipline}")
-    st.caption(f"Filtrowanie aktywne: Minimalny Edge >= {int(min_edge_slider*100)}% + Adaptive Temporal Weights Active")
+    st.caption(f"Filtrowanie aktywne: Minimalny Edge >= {int(min_edge_slider*100)}% + Czas polski (CET/CEST)")
     
     if not analyzed_matches:
-        st.warning("Brak spotkań spełniających kryteria przewagi rynkowej w najbliższych 36h.")
+        st.warning("Brak spotkań spełniających kryteria przewagi rynkowej w najbliższych godzinach.")
     else:
         for m in analyzed_matches:
             edge_pct = round(m['edge'] * 100, 1)
@@ -472,7 +485,7 @@ with tab1:
                 st.markdown(f"""
                     <div class="value-card">
                         <h3>{m['home']} vs {m['away']}</h3>
-                        <p style="color: #94a3b8; font-size: 12px;">Start: {m.get('commence_time', 'Najbliższe godziny')}</p>
+                        <p style="color: #94a3b8; font-size: 12px;">Start (czas pl): {m['local_time']}</p>
                         <p>🎯 <b>Typ AI / Handicap:</b> <span style="color: #60a5fa;">{m['best_pick']}</span></p>
                         <p>🔥 <b>Value:</b> <span style="color: #34d399;">+{edge_pct}%</span> | 💰 <b>Stawka:</b> {m['stake']} PLN</p>
                     </div>
