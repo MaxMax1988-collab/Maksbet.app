@@ -104,8 +104,8 @@ db_conn = init_db()
 # --- ADAPTIVE TEMPORAL WEIGHTING ENGINE ---
 def get_adaptive_weights(discipline_name):
     current_month = datetime.now().month
-    if discipline_name == "🏀 NBA Koszykówka":
-        if current_month in [10, 11, 12]:  # Początek sezonu: nacisk na zgranie i Net Rating
+    if discipline_name in ["🏀 NBA Koszykówka", "🏀 Euroliga Koszykówka"]:
+        if current_month in [10, 11, 12]:
             return {
                 "Zgranie / Net Rating": 0.25,
                 "Forma Ostatnich Meczów": 0.15,
@@ -114,7 +114,7 @@ def get_adaptive_weights(discipline_name):
                 "Siła Obrony": 0.15,
                 "Ranking Elo": 0.10
             }
-        elif current_month in [1, 2]:  # Środek sezonu: dominacja zmęczenia i terminarza (b2b)
+        elif current_month in [1, 2]:
             return {
                 "Zmęczenie / Terminarz (b2b)": 0.30,
                 "Forma Ostatnich Meczów": 0.20,
@@ -123,7 +123,7 @@ def get_adaptive_weights(discipline_name):
                 "Ranking Elo": 0.10,
                 "H2H": 0.08
             }
-        else:  # Końcówka sezonu: walka o seeding i clutch performance
+        else:
             return {
                 "Clutch / Efficiency": 0.30,
                 "Motywacja / Seeding": 0.25,
@@ -131,7 +131,7 @@ def get_adaptive_weights(discipline_name):
                 "Forma Ostatnich Meczów": 0.15,
                 "Ranking Elo": 0.10
             }
-    elif discipline_name == "🏒 NHL Hokej":
+    elif discipline_name in ["🏒 NHL Hokej", "🏒 AHL Hokej"]:
         return {
             "Forma Ostatnich Meczów": 0.18,
             "Przewaga Dom/Wyjazd": 0.12,
@@ -152,7 +152,7 @@ def get_adaptive_weights(discipline_name):
             "H2H (Bezpośrednie)": 0.10
         }
 
-# --- CACHOWANE ZAPYTANIA API (H2H + SPREADS) ---
+# --- CACHOWANE ZAPYTANIA API ---
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_odds_cached(discipline_name, odds_key):
     now = datetime.utcnow()
@@ -165,8 +165,13 @@ def fetch_odds_cached(discipline_name, odds_key):
     if discipline_name == "🏀 NBA Koszykówka":
         sport_keys = ["basketball_nba"]
         markets_param = "h2h,spreads"
+    elif discipline_name == "🏀 Euroliga Koszykówka":
+        sport_keys = ["basketball_euroleague"]
+        markets_param = "h2h,spreads"
     elif discipline_name == "🏒 NHL Hokej":
         sport_keys = ["icehockey_nhl"]
+    elif discipline_name == "🏒 AHL Hokej":
+        sport_keys = ["icehockey_ahl"]
     elif discipline_name == "🎾 Tenis (WTA/ATP)":
         try:
             sports_res = requests.get(f"https://api.the-odds-api.com/v4/sports/?apiKey={odds_key}", timeout=10)
@@ -255,7 +260,9 @@ class AutonomousDataFetcher:
 
         sport_key_map = {
             "🏀 NBA Koszykówka": "basketball_nba",
+            "🏀 Euroliga Koszykówka": "basketball_euroleague",
             "🏒 NHL Hokej": "icehockey_nhl",
+            "🏒 AHL Hokej": "icehockey_ahl",
             "🎾 Tenis (WTA/ATP)": "tennis_atp_us_open"
         }
 
@@ -327,7 +334,16 @@ with st.sidebar:
     st.caption("Autonomous Quant Engine")
     st.markdown("---")
     
-    discipline = st.selectbox("Dyscyplina", ["🏀 NBA Koszykówka", "🏒 NHL Hokej", "🎾 Tenis (WTA/ATP)"])
+    discipline = st.selectbox(
+        "Dyscyplina", 
+        [
+            "🏀 NBA Koszykówka", 
+            "🏀 Euroliga Koszykówka", 
+            "🏒 NHL Hokej", 
+            "🏒 AHL Hokej", 
+            "🎾 Tenis (WTA/ATP)"
+        ]
+    )
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
     min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=1.0, max_value=15.0, value=5.0, step=0.5) / 100.0
@@ -341,8 +357,8 @@ with st.sidebar:
 
     st.markdown("---")
     current_weights = get_adaptive_weights(discipline)
-    st.markdown(f"**🧠 Adaptacyjne Wagi AI ({discipline})**")
-    st.caption("Parametry dostosowują się do fazy sezonu.")
+    st.markdown(f"**🧠 Adaptacyjne Wagi AI**")
+    st.caption(f"({discipline})")
     for feature_name, weight_val in current_weights.items():
         st.text(f"{feature_name}: {int(weight_val*100)}%")
         st.progress(weight_val)
