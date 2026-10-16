@@ -101,7 +101,58 @@ def init_db():
 
 db_conn = init_db()
 
-# --- CACHOWANE ZAPYTANIA API (Z OBSŁUGĄ SPREADS/HANDICAP DLA NBA) ---
+# --- ADAPTIVE TEMPORAL WEIGHTING ENGINE ---
+def get_adaptive_weights(discipline_name):
+    current_month = datetime.now().month
+    if discipline_name == "🏀 NBA Koszykówka":
+        if current_month in [10, 11, 12]:  # Początek sezonu: nacisk na zgranie i Net Rating
+            return {
+                "Zgranie / Net Rating": 0.25,
+                "Forma Ostatnich Meczów": 0.15,
+                "Przewaga Dom/Wyjazd": 0.15,
+                "Siła Ataku": 0.20,
+                "Siła Obrony": 0.15,
+                "Ranking Elo": 0.10
+            }
+        elif current_month in [1, 2]:  # Środek sezonu: dominacja zmęczenia i terminarza (b2b)
+            return {
+                "Zmęczenie / Terminarz (b2b)": 0.30,
+                "Forma Ostatnich Meczów": 0.20,
+                "Siła Obrony": 0.20,
+                "Przewaga Dom/Wyjazd": 0.12,
+                "Ranking Elo": 0.10,
+                "H2H": 0.08
+            }
+        else:  # Końcówka sezonu: walka o seeding i clutch performance
+            return {
+                "Clutch / Efficiency": 0.30,
+                "Motywacja / Seeding": 0.25,
+                "Zmęczenie / Terminarz": 0.20,
+                "Forma Ostatnich Meczów": 0.15,
+                "Ranking Elo": 0.10
+            }
+    elif discipline_name == "🏒 NHL Hokej":
+        return {
+            "Forma Ostatnich Meczów": 0.18,
+            "Przewaga Dom/Wyjazd": 0.12,
+            "Zmęczenie / Terminarz": 0.20,
+            "Siła Ataku": 0.16,
+            "Siła Obrony": 0.22,
+            "Ranking Elo": 0.08,
+            "H2H (Bezpośrednie)": 0.04
+        }
+    else:  # Tenis
+        return {
+            "Forma Ostatnich Meczów": 0.40,
+            "Przewaga Dom/Wyjazd": 0.00,
+            "Zmęczenie / Terminarz": 0.25,
+            "Siła Ataku": 0.10,
+            "Siła Obrony": 0.05,
+            "Ranking Elo": 0.10,
+            "H2H (Bezpośrednie)": 0.10
+        }
+
+# --- CACHOWANE ZAPYTANIA API (H2H + SPREADS) ---
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_odds_cached(discipline_name, odds_key):
     now = datetime.utcnow()
@@ -143,7 +194,6 @@ def fetch_odds_cached(discipline_name, odds_key):
                     
                     odds_home, odds_away = 1.90, 1.90
                     spread_home, spread_away = None, None
-                    spread_odds_home, spread_odds_away = 1.90, 1.90
                     
                     bookmakers = match.get('bookmakers', [])
                     if bookmakers:
@@ -158,10 +208,8 @@ def fetch_odds_cached(discipline_name, odds_key):
                                 for o in m_type.get('outcomes', []):
                                     if o.get('name') == home:
                                         spread_home = o.get('point', 0.0)
-                                        spread_odds_home = o.get('price', 1.90)
                                     elif o.get('name') == away:
                                         spread_away = o.get('point', 0.0)
-                                        spread_odds_away = o.get('price', 1.90)
 
                     prob_raw_home = 1.0 / odds_home
                     prob_raw_away = 1.0 / odds_away
@@ -177,8 +225,6 @@ def fetch_odds_cached(discipline_name, odds_key):
                         "odds_away": float(odds_away),
                         "spread_home": spread_home,
                         "spread_away": spread_away,
-                        "spread_odds_home": spread_odds_home,
-                        "spread_odds_away": spread_odds_away,
                         "form_diff": (implied_home - 0.5),
                         "home_away_adv": 0.05,
                         "fatigue_diff": 0.0,
@@ -273,14 +319,7 @@ def init_self_learning_xgboost():
 
 model = init_self_learning_xgboost()
 fetcher = AutonomousDataFetcher(ODDS_API_KEY)
-
 fetcher.auto_settle_bets(db_conn)
-
-sport_weights = {
-    "🏀 NBA Koszykówka": {"Forma Ostatnich Meczów": 0.22, "Przewaga Dom/Wyjazd": 0.16, "Zmęczenie / Terminarz": 0.16, "Siła Ataku": 0.20, "Siła Obrony": 0.14, "Ranking Elo": 0.08, "H2H (Bezpośrednie)": 0.04},
-    "🏒 NHL Hokej": {"Forma Ostatnich Meczów": 0.18, "Przewaga Dom/Wyjazd": 0.12, "Zmęczenie / Terminarz": 0.20, "Siła Ataku": 0.16, "Siła Obrony": 0.22, "Ranking Elo": 0.08, "H2H (Bezpośrednie)": 0.04},
-    "🎾 Tenis (WTA/ATP)": {"Forma Ostatnich Meczów": 0.40, "Przewaga Dom/Wyjazd": 0.00, "Zmęczenie / Terminarz": 0.25, "Siła Ataku": 0.10, "Siła Obrony": 0.05, "Ranking Elo": 0.10, "H2H (Bezpośrednie)": 0.10}
-}
 
 # --- PANEL BOCZNY ---
 with st.sidebar:
@@ -301,11 +340,12 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("---")
-    st.markdown(f"**🧠 Wagi AI: {discipline}**")
-    for feature_name, weight_val in sport_weights[discipline].items():
-        if weight_val > 0:
-            st.text(f"{feature_name}: {int(weight_val*100)}%")
-            st.progress(weight_val)
+    current_weights = get_adaptive_weights(discipline)
+    st.markdown(f"**🧠 Adaptacyjne Wagi AI ({discipline})**")
+    st.caption("Parametry dostosowują się do fazy sezonu.")
+    for feature_name, weight_val in current_weights.items():
+        st.text(f"{feature_name}: {int(weight_val*100)}%")
+        st.progress(weight_val)
 
     st.markdown("---")
     cursor = db_conn.cursor()
@@ -403,7 +443,7 @@ tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value", "📁 Rejestr, ROI & Heatmapa
 
 with tab1:
     st.subheader(f"Terminal Analityczny: {discipline}")
-    st.caption(f"Filtrowanie aktywne: Minimalny Edge >= {int(min_edge_slider*100)}% + Handicap/Spread Engine")
+    st.caption(f"Filtrowanie aktywne: Minimalny Edge >= {int(min_edge_slider*100)}% + Adaptive Temporal Weights Active")
     
     if not analyzed_matches:
         st.warning("Brak spotkań spełniających kryteria przewagi rynkowej w najbliższych 36h.")
