@@ -104,9 +104,7 @@ db_conn = init_db()
 # --- POMOCNIK DO KONWERSJI CZASU NA POLSKI (CET/CEST) ---
 def format_match_time(commence_time_str):
     try:
-        # Parsowanie czasu UTC z API
         dt_utc = datetime.strptime(commence_time_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-        # Przesunięcie dla Polski (w październiku obowiązuje UTC+2)
         dt_pl = dt_utc + timedelta(hours=2)
         return dt_pl.strftime("%d.%m, %H:%M")
     except Exception:
@@ -163,14 +161,9 @@ def get_adaptive_weights(discipline_name):
             "H2H (Bezpośrednie)": 0.10
         }
 
-# --- CACHOWANE ZAPYTANIA API (BEZPIECZNE OKNO CZASOWE) ---
+# --- CACHOWANE ZAPYTANIA API (NAPRAWIONE OKNO) ---
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_odds_cached(discipline_name, odds_key):
-    now_utc = datetime.now(timezone.utc)
-    from_time = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-    # Pobieramy dokładne okno najbliższych 48 godzin, aby uniknąć śmieciowych danych
-    to_time = (now_utc + timedelta(hours=48)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    
     sport_keys = []
     markets_param = "h2h"
     
@@ -199,7 +192,8 @@ def fetch_odds_cached(discipline_name, odds_key):
     all_matches = []
     
     for key in sport_keys:
-        url = f"https://api.the-odds-api.com/v4/sports/{key}/odds/?apiKey={odds_key}&regions=eu&markets={markets_param}&commenceTimeFrom={from_time}&commenceTimeTo={to_time}"
+        # Pobieramy pełną listę aktywną bez sztucznych ograniczeń czasowych po stronie API
+        url = f"https://api.the-odds-api.com/v4/sports/{key}/odds/?apiKey={odds_key}&regions=eu&markets={markets_param}"
         try:
             res = requests.get(url, timeout=10)
             if res.status_code == 200:
@@ -367,6 +361,12 @@ with st.sidebar:
         st.success("Zakończono synchronizację!")
         st.rerun()
 
+    # Przycisk do czyszczenia cache API w razie problemów
+    if st.button("🧹 Wyczyść Cache API"):
+        st.cache_data.clear()
+        st.success("Wyczyszczono pamięć podręczną API!")
+        st.rerun()
+
     st.markdown("---")
     current_weights = get_adaptive_weights(discipline)
     st.markdown(f"**🧠 Adaptacyjne Wagi AI**")
@@ -475,7 +475,7 @@ with tab1:
     st.caption(f"Filtrowanie aktywne: Minimalny Edge >= {int(min_edge_slider*100)}% + Czas polski (CET/CEST)")
     
     if not analyzed_matches:
-        st.warning("Brak spotkań spełniających kryteria przewagi rynkowej w najbliższych godzinach.")
+        st.warning("Brak spotkań w ofercie API dla tej dyscypliny w tej chwili.")
     else:
         for m in analyzed_matches:
             edge_pct = round(m['edge'] * 100, 1)
