@@ -24,12 +24,10 @@ st.markdown("""
         background-color: #0b0f19;
         color: #f3f4f6;
     }
-    /* Pasek boczny w stylu ciemnego glassmorphismu */
     [data-testid="stSidebar"] {
         background-color: #111827;
         border-right: 1px solid #1f2937;
     }
-    /* Kafelki metryk */
     .stMetric {
         background: linear-gradient(135deg, #1f2937 0%, #111827 100%);
         padding: 15px;
@@ -37,7 +35,6 @@ st.markdown("""
         border: 1px solid #374151;
         box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
     }
-    /* Karta wartości (Value Card) w nowoczesnym stylu */
     .value-card {
         background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
         border-left: 6px solid #10b981;
@@ -49,7 +46,6 @@ st.markdown("""
         border-right: 1px solid #334155;
         border-bottom: 1px solid #334155;
     }
-    /* Stylowanie przycisków */
     .stButton>button {
         background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
         color: white;
@@ -105,7 +101,7 @@ def init_db():
 
 db_conn = init_db()
 
-# --- OPTYMALIZACJA: AGRESYWNY CACHING ZAPYTAN DO API ---
+# --- OPTYMALIZACJA: CACHING ZAPYTAN KURSOWYCH ---
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_odds_cached(discipline_name, odds_key):
     now = datetime.utcnow()
@@ -179,17 +175,6 @@ def fetch_odds_cached(discipline_name, odds_key):
             
     return all_matches
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def fetch_scores_cached(sport_key, odds_key):
-    scores_url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores/?apiKey={odds_key}&daysFrom=2"
-    try:
-        res = requests.get(scores_url, timeout=10)
-        if res.status_code == 200:
-            return res.json()
-    except Exception:
-        pass
-    return []
-
 class AutonomousDataFetcher:
     def __init__(self, odds_key):
         self.odds_key = odds_key
@@ -198,7 +183,7 @@ class AutonomousDataFetcher:
         return fetch_odds_cached(discipline_name, self.odds_key)
 
     def auto_settle_bets(self, conn):
-        """Automatycznie pobiera wyniki z API (z cache) i rozlicza oczekujące zakłady w bazie."""
+        """Bezpośrednie pobieranie i rozliczanie meczów z pominięciem starego cache wyników."""
         cursor = conn.cursor()
         cursor.execute("SELECT id, sport, odds, stake, best_pick, home_team, away_team FROM bets WHERE status = 'Oczekujący'")
         pending_bets = cursor.fetchall()
@@ -216,33 +201,41 @@ class AutonomousDataFetcher:
             bet_id, sport, odds, stake, best_pick, home_team, away_team = bet
             s_key = sport_key_map.get(sport, "icehockey_nhl")
             
-            matches_data = fetch_scores_cached(s_key, self.odds_key)
-            if matches_data:
-                for match in matches_data:
-                    if match.get('id') == bet_id and match.get('completed'):
-                        scores = match.get('scores', [])
-                        if scores:
-                            winner = None
-                            max_score = -1
-                            for s in scores:
-                                sc_val = float(s.get('score', 0))
-                                if sc_val > max_score:
-                                    max_score = sc_val
-                                    winner = s.get('name')
+            # Bezpośrednie zapytanie o wyniki bez cache, aby mieć pewność pobrania świeżych danych
+            scores_url = f"https://api.the-odds-api.com/v4/sports/{s_key}/scores/?apiKey={self.odds_key}&daysFrom=3"
+            try:
+                res = requests.get(scores_url, timeout=10)
+                if res.status_code == 200:
+                    matches_data = res.json()
+                    for match in matches_data:
+                        if match.get('id') == bet_id and match.get('completed'):
+                            scores = match.get('scores', [])
+                            if scores:
+                                winner = None
+                                max_score = -999
+                                for s in scores:
+                                    try:
+                                        sc_val = float(s.get('score', 0))
+                                        if sc_val > max_score:
+                                            max_score = sc_val
+                                            winner = s.get('name')
+                                    except Exception:
+                                        continue
+                                        
+                                if winner:
+                                    # Elastyczne dopasowanie (sprawdzenie czy nazwa zwycięzcy zawiera wytypowaną drużynę lub odwrotnie)
+                                    is_won = (best_pick.lower() in winner.lower()) or (winner.lower() in best_pick.lower())
                                     
-                            if winner:
-                                if winner == best_pick:
-                                    status = "Wygrany"
-                                    profit = round(stake * (odds - 1), 2)
-                                else:
-                                    status = "Przegrany"
-                                    profit = round(-stake, 2)
-                                    
-                                cursor.execute(
-                                    "UPDATE bets SET status = ?, profit = ? WHERE id = ?",
-                                    (status, profit, bet_id)
-                                )
-                                conn.commit()
+                                    status = "Wygrany" if is_won else "Przegrany"
+                                    profit = round(stake * (odds - 1), 2) if is_won else round(-stake, 2)
+                                        
+                                    cursor.execute(
+                                        "UPDATE bets SET status = ?, profit = ? WHERE id = ?",
+                                        (status, profit, bet_id)
+                                    )
+                                    conn.commit()
+            except Exception:
+                continue
 
 @st.cache_resource
 def init_self_learning_xgboost():
@@ -268,7 +261,7 @@ def init_self_learning_xgboost():
 model = init_self_learning_xgboost()
 fetcher = AutonomousDataFetcher(ODDS_API_KEY)
 
-# Uruchomienie automatycznego rozliczania w tle
+# Uruchomienie automatycznego rozliczania przy starcie
 fetcher.auto_settle_bets(db_conn)
 
 sport_weights = {
@@ -288,6 +281,13 @@ with st.sidebar:
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
     min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=1.0, max_value=15.0, value=5.0, step=0.5) / 100.0
     
+    st.markdown("---")
+    if st.button("🔄 Wymusź Auto-Rozliczenie"):
+        with st.spinner("Pobieranie wyników i rozliczanie zakładów..."):
+            fetcher.auto_settle_bets(db_conn)
+        st.success("Zakończono synchronizację!")
+        st.rerun()
+
     st.markdown("---")
     st.markdown(f"**🧠 Wagi AI: {discipline}**")
     for feature_name, weight_val in sport_weights[discipline].items():
@@ -383,7 +383,7 @@ tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value", "📁 Rejestr, ROI & Heatmapa
 
 with tab1:
     st.subheader(f"Terminal Analityczny: {discipline}")
-    st.caption(f"Filtrowanie aktywne: Minimalny Edge >= {int(min_edge_slider*100)}% + Caching (Ochrona API) Active")
+    st.caption(f"Filtrowanie aktywne: Minimalny Edge >= {int(min_edge_slider*100)}% + Auto-Settlement Ready")
     
     if not analyzed_matches:
         st.warning("Brak spotkań spełniających kryteria przewagi rynkowej w najbliższych 36h.")
@@ -496,5 +496,4 @@ with tab3:
             y='cumulative_profit:Q',
             tooltip=['date', 'cumulative_profit']
         ).properties(height=350)
-        st.altair_chart(chart, use_container_width=True)
-                
+        st.altair_chart(chart, use_container_width
