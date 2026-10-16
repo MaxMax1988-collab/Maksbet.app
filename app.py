@@ -161,14 +161,9 @@ def get_adaptive_weights(discipline_name):
             "H2H (Bezpośrednie)": 0.10
         }
 
-# --- CACHOWANE ZAPYTANIA API (NAPRAWIONE OKNO CZASOWE) ---
-@st.cache_data(ttl=1800, show_spinner=False)
+# --- CACHOWANE ZAPYTANIA API Z TRYBEM DEBUG ---
+@st.cache_data(ttl=60, show_spinner=False)
 def fetch_odds_cached(discipline_name, odds_key):
-    now_utc = datetime.now(timezone.utc)
-    from_time = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-    # Zakres na najbliższe 7 dni gwarantuje pobranie pełnej oferty bez pustych odpowiedzi
-    to_time = (now_utc + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    
     sport_keys = []
     markets_param = "h2h"
     
@@ -183,72 +178,67 @@ def fetch_odds_cached(discipline_name, odds_key):
     elif discipline_name == "🏒 AHL Hokej":
         sport_keys = ["icehockey_ahl"]
     elif discipline_name == "🎾 Tenis (WTA/ATP)":
-        try:
-            sports_res = requests.get(f"https://api.the-odds-api.com/v4/sports/?apiKey={odds_key}", timeout=10)
-            if sports_res.status_code == 200:
-                all_sports = sports_res.json()
-                sport_keys = [s['key'] for s in all_sports if s.get('group') == 'Tennis' and s.get('active')]
-        except Exception:
-            sport_keys = []
-        
-        if not sport_keys:
-            sport_keys = ["tennis_atp_us_open", "tennis_wta_us_open"]
+        sport_keys = ["tennis_atp_us_open", "tennis_wta_us_open"]
 
     all_matches = []
     
     for key in sport_keys:
-        url = f"https://api.the-odds-api.com/v4/sports/{key}/odds/?apiKey={odds_key}&regions=eu&markets={markets_param}&commenceTimeFrom={from_time}&commenceTimeTo={to_time}"
+        url = f"https://api.the-odds-api.com/v4/sports/{key}/odds/?apiKey={odds_key}&regions=eu&markets={markets_param}"
         try:
             res = requests.get(url, timeout=10)
-            if res.status_code == 200:
-                data = res.json()
-                for match in data:
-                    home = match.get('home_team')
-                    away = match.get('away_team')
-                    commence_time = match.get('commence_time')
-                    
-                    odds_home, odds_away = 1.90, 1.90
-                    spread_home, spread_away = None, None
-                    
-                    bookmakers = match.get('bookmakers', [])
-                    if bookmakers:
-                        for m_type in bookmakers[0].get('markets', []):
-                            if m_type.get('key') == 'h2h':
-                                for o in m_type.get('outcomes', []):
-                                    if o.get('name') == home:
-                                        odds_home = o.get('price', 1.90)
-                                    elif o.get('name') == away:
-                                        odds_away = o.get('price', 1.90)
-                            elif m_type.get('key') == 'spreads':
-                                for o in m_type.get('outcomes', []):
-                                    if o.get('name') == home:
-                                        spread_home = o.get('point', 0.0)
-                                    elif o.get('name') == away:
-                                        spread_away = o.get('point', 0.0)
+            if res.status_code != 200:
+                st.error(f"⚠️ Błąd API ({key}): Status {res.status_code} - {res.text}")
+                continue
+                
+            data = res.json()
+            for match in data:
+                home = match.get('home_team')
+                away = match.get('away_team')
+                commence_time = match.get('commence_time')
+                
+                odds_home, odds_away = 1.90, 1.90
+                spread_home, spread_away = None, None
+                
+                bookmakers = match.get('bookmakers', [])
+                if bookmakers:
+                    for m_type in bookmakers[0].get('markets', []):
+                        if m_type.get('key') == 'h2h':
+                            for o in m_type.get('outcomes', []):
+                                if o.get('name') == home:
+                                    odds_home = o.get('price', 1.90)
+                                elif o.get('name') == away:
+                                    odds_away = o.get('price', 1.90)
+                        elif m_type.get('key') == 'spreads':
+                            for o in m_type.get('outcomes', []):
+                                if o.get('name') == home:
+                                    spread_home = o.get('point', 0.0)
+                                elif o.get('name') == away:
+                                    spread_away = o.get('point', 0.0)
 
-                    prob_raw_home = 1.0 / odds_home
-                    prob_raw_away = 1.0 / odds_away
-                    total_vig = prob_raw_home + prob_raw_away
-                    implied_home = prob_raw_home / total_vig
+                prob_raw_home = 1.0 / odds_home
+                prob_raw_away = 1.0 / odds_away
+                total_vig = prob_raw_home + prob_raw_away
+                implied_home = prob_raw_home / total_vig
 
-                    all_matches.append({
-                        "id": match.get('id'),
-                        "home": home,
-                        "away": away,
-                        "commence_time": commence_time,
-                        "odds_home": float(odds_home),
-                        "odds_away": float(odds_away),
-                        "spread_home": spread_home,
-                        "spread_away": spread_away,
-                        "form_diff": (implied_home - 0.5),
-                        "home_away_adv": 0.05,
-                        "fatigue_diff": 0.0,
-                        "off_diff": (implied_home - 0.5) * 0.4,
-                        "def_diff": -(implied_home - 0.5) * 0.4,
-                        "elo_diff": (implied_home - 0.5) * 50,
-                        "h2h": implied_home
-                    })
-        except Exception:
+                all_matches.append({
+                    "id": match.get('id'),
+                    "home": home,
+                    "away": away,
+                    "commence_time": commence_time,
+                    "odds_home": float(odds_home),
+                    "odds_away": float(odds_away),
+                    "spread_home": spread_home,
+                    "spread_away": spread_away,
+                    "form_diff": (implied_home - 0.5),
+                    "home_away_adv": 0.05,
+                    "fatigue_diff": 0.0,
+                    "off_diff": (implied_home - 0.5) * 0.4,
+                    "def_diff": -(implied_home - 0.5) * 0.4,
+                    "elo_diff": (implied_home - 0.5) * 50,
+                    "h2h": implied_home
+                })
+        except Exception as e:
+            st.error(f"❌ Wyjątek połączenia: {str(e)}")
             continue
             
     return all_matches
@@ -589,3 +579,4 @@ with tab3:
             tooltip=['date', 'cumulative_profit']
         ).properties(height=350)
         st.altair_chart(chart, use_container_width=True)
+       
