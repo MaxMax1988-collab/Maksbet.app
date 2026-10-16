@@ -63,7 +63,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-ODDS_API_KEY = "D96ffb1ff724de716b7bf43383835b30"
+ODDS_API_KEY = "7e077b120597a7ecaf2195a02bd7c3b7"
 
 # --- BAZA DANYCH SQLITE ---
 def init_db():
@@ -162,7 +162,7 @@ def get_adaptive_weights(discipline_name):
         }
 
 # --- CACHOWANE ZAPYTANIA API Z TRYBEM DEBUG ---
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_odds_cached(discipline_name, odds_key):
     sport_keys = []
     markets_param = "h2h"
