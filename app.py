@@ -161,9 +161,14 @@ def get_adaptive_weights(discipline_name):
             "H2H (Bezpośrednie)": 0.10
         }
 
-# --- CACHOWANE ZAPYTANIA API (NAPRAWIONE OKNO) ---
+# --- CACHOWANE ZAPYTANIA API (NAPRAWIONE OKNO CZASOWE) ---
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_odds_cached(discipline_name, odds_key):
+    now_utc = datetime.now(timezone.utc)
+    from_time = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Zakres na najbliższe 7 dni gwarantuje pobranie pełnej oferty bez pustych odpowiedzi
+    to_time = (now_utc + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    
     sport_keys = []
     markets_param = "h2h"
     
@@ -192,8 +197,7 @@ def fetch_odds_cached(discipline_name, odds_key):
     all_matches = []
     
     for key in sport_keys:
-        # Pobieramy pełną listę aktywną bez sztucznych ograniczeń czasowych po stronie API
-        url = f"https://api.the-odds-api.com/v4/sports/{key}/odds/?apiKey={odds_key}&regions=eu&markets={markets_param}"
+        url = f"https://api.the-odds-api.com/v4/sports/{key}/odds/?apiKey={odds_key}&regions=eu&markets={markets_param}&commenceTimeFrom={from_time}&commenceTimeTo={to_time}"
         try:
             res = requests.get(url, timeout=10)
             if res.status_code == 200:
@@ -361,7 +365,6 @@ with st.sidebar:
         st.success("Zakończono synchronizację!")
         st.rerun()
 
-    # Przycisk do czyszczenia cache API w razie problemów
     if st.button("🧹 Wyczyść Cache API"):
         st.cache_data.clear()
         st.success("Wyczyszczono pamięć podręczną API!")
