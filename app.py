@@ -162,36 +162,36 @@ def fetch_bigballs_cached(discipline_name, api_key):
         "Accept": "application/json"
     }
     
-    sport_mapping = {
-        "🏀 NBA Koszykówka": {"sport": "basketball", "league": "nba"},
-        "🏒 NHL Hokej": {"sport": "icehockey", "league": "nhl"}
-    }
+    # Przesyłamy elastyczne parametry sportu
+    if discipline_name == "🏀 NBA Koszykówka":
+        params = {"sport": "basketball", "limit": 50}
+    else:
+        params = {"sport": "ice_hockey", "limit": 50}
     
-    params = sport_mapping.get(discipline_name, {"sport": "basketball", "league": "nba"})
     url = f"{BIGBALLS_BASE_URL}/matches"
-    
     all_matches = []
+    
     try:
         res = requests.get(url, headers=headers, params=params, timeout=10)
         if res.status_code == 200:
             data = res.json().get("data", [])
             for match in data:
-                home = match.get('home_team', 'Home')
-                away = match.get('away_team', 'Away')
-                commence_time = match.get('commence_time', datetime.now(timezone.utc).isoformat())
+                home = match.get('home_team') or match.get('home') or 'Home'
+                away = match.get('away_team') or match.get('away') or 'Away'
+                commence_time = match.get('commence_time') or match.get('start_time') or datetime.now(timezone.utc).isoformat()
                 
-                odds_home = float(match.get('odds_home', 1.90))
-                odds_away = float(match.get('odds_away', 1.90))
+                odds_home = float(match.get('odds_home', 1.95))
+                odds_away = float(match.get('odds_away', 1.85))
                 spread_home = match.get('spread_home', 0.0)
                 spread_away = match.get('spread_away', 0.0)
                 
-                prob_raw_home = 1.0 / odds_home
-                prob_raw_away = 1.0 / odds_away
+                prob_raw_home = 1.0 / odds_home if odds_home > 0 else 0.5
+                prob_raw_away = 1.0 / odds_away if odds_away > 0 else 0.5
                 total_vig = prob_raw_home + prob_raw_away
                 implied_home = prob_raw_home / total_vig if total_vig > 0 else 0.5
                 
                 all_matches.append({
-                    "id": match.get('id', f"{home}_{away}"),
+                    "id": str(match.get('id', f"{home}_{away}")),
                     "home": home,
                     "away": away,
                     "commence_time": commence_time,
@@ -207,8 +207,8 @@ def fetch_bigballs_cached(discipline_name, api_key):
                     "elo_diff": (implied_home - 0.5) * 50,
                     "h2h": implied_home
                 })
-    except Exception:
-        pass
+    except Exception as e:
+        st.error(f"Błąd API BigBalls Data: {e}")
         
     return all_matches
 
@@ -240,7 +240,7 @@ class AutonomousDataFetcher:
                 if res.status_code == 200:
                     matches_data = res.json().get("data", [])
                     for match in matches_data:
-                        if match.get('id') == bet_id and match.get('completed'):
+                        if str(match.get('id')) == str(bet_id) and match.get('completed'):
                             winner = match.get('winner')
                             if winner:
                                 is_won = (best_pick.lower() in winner.lower()) or (winner.lower() in best_pick.lower())
@@ -286,13 +286,13 @@ with st.sidebar:
     st.caption("Autonomous Quant Engine")
     st.markdown("---")
     
-    discipline = st.selectbox("Dyscyplina", ["🏀 NBA Koszykówka", "🏒 NHL Hokej"])
+    discipline = st.selectbox("Dyscyplina", ["🏒 NHL Hokej", "🏀 NBA Koszykówka"])
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
-    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=1.0, max_value=15.0, value=5.0, step=0.5) / 100.0
+    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=1.0, max_value=15.0, value=3.0, step=0.5) / 100.0
     
     st.markdown("---")
-    if st.button("🔄 Wymusź Auto-Rozliczenie"):
+    if st.button("🔄 Wymuś Auto-Rozliczenie"):
         with st.spinner("Pobieranie wyników i rozliczanie zakładów..."):
             fetcher.auto_settle_bets(db_conn)
         st.success("Zakończono synchronizację!")
@@ -512,4 +512,4 @@ with tab3:
             tooltip=['date', 'cumulative_profit']
         ).properties(height=350)
         st.altair_chart(chart, use_container_width=True)
-    
+        
