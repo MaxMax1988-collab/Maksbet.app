@@ -63,7 +63,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-ODDS_API_KEY = "f13c7d2c08077c2894cab879d0905234"
+ODDS_API_KEY = "D96ffb1ff724de716b7bf43383835b30"
 
 # --- BAZA DANYCH SQLITE ---
 def init_db():
@@ -579,4 +579,3 @@ with tab3:
             tooltip=['date', 'cumulative_profit']
         ).properties(height=350)
         st.altair_chart(chart, use_container_width=True)
-       
