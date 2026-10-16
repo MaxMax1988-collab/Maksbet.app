@@ -201,7 +201,6 @@ class AutonomousDataFetcher:
             bet_id, sport, odds, stake, best_pick, home_team, away_team = bet
             s_key = sport_key_map.get(sport, "icehockey_nhl")
             
-            # Bezpośrednie zapytanie o wyniki bez cache, aby mieć pewność pobrania świeżych danych
             scores_url = f"https://api.the-odds-api.com/v4/sports/{s_key}/scores/?apiKey={self.odds_key}&daysFrom=3"
             try:
                 res = requests.get(scores_url, timeout=10)
@@ -223,7 +222,6 @@ class AutonomousDataFetcher:
                                         continue
                                         
                                 if winner:
-                                    # Elastyczne dopasowanie (sprawdzenie czy nazwa zwycięzcy zawiera wytypowaną drużynę lub odwrotnie)
                                     is_won = (best_pick.lower() in winner.lower()) or (winner.lower() in best_pick.lower())
                                     
                                     status = "Wygrany" if is_won else "Przegrany"
@@ -496,4 +494,4 @@ with tab3:
             y='cumulative_profit:Q',
             tooltip=['date', 'cumulative_profit']
         ).properties(height=350)
-        st.altair_chart(chart, use_container_width
+        st.altair_chart(chart, use_container_width=True)
