@@ -34,27 +34,23 @@ st.markdown("""
 ODDS_API_KEY = "3e81b37bac9bb7efbe8d2cf68065b6dc"
 ODDS_BASE_URL = "https://api.the-odds-api.com/v4/sports"
 
-# --- HELPER: NORMALIZACJA NAZW DRUŻYN DO DOPASOWANIA ---
+# --- HELPER: NORMALIZACJA NAZW DRUŻYN ---
 def normalize_team_name(name):
     if not name:
         return ""
     name = name.lower()
     name = re.sub(r'[^a-z0-9\s]', '', name)
-    # Usuwamy powszechne przedrostki miast/stanów, aby dopasowywać po trzonie nazwy
-    words = name.split()
-    return " ".join(words)
+    return " ".join(name.split())
 
 def find_best_stats_match(team_name, stats_dict):
     norm_target = normalize_team_name(team_name)
     if not norm_target or not stats_dict:
         return None
     
-    # 1. Dokładne dopasowanie po znormalizowanej nazwie
     for key, val in stats_dict.items():
         if normalize_team_name(key) == norm_target:
             return val
             
-    # 2. Dopasowanie częściowe (słowo kluczowe nazwy zespołu, np. "penguins", "blackhawks")
     target_words = [w for w in norm_target.split() if len(w) > 3]
     for key, val in stats_dict.items():
         norm_key = normalize_team_name(key)
@@ -137,6 +133,66 @@ def fetch_nhl_live_stats():
     return {}
 
 nhl_stats_cache = fetch_nhl_live_stats()
+
+# --- MODUŁ POBIERANIA STATYSTYK AHL (Oficjalne HockeyTech / LeagueStat API) ---
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_ahl_live_stats():
+    try:
+        url = "https://lscluster.hockeytech.com/feed/index.php"
+        params = {
+            "feed": "modulekit",
+            "view": "statviewtype",
+            "type": "standings",
+            "client_code": "ahl",
+            "key": "446521baf8c38984",
+            "fmt": "json"
+        }
+        res = requests.get(url, params=params, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            stats_dict = {}
+            # Parsowanie struktury HockeyTech dla tabel ligowych
+            sections = data.get("securables", data.get("site_kit", {}).get("standings", []))
+            # Bezpieczne przeszukiwanie obiektów JSON w feedzie HockeyTech
+            teams_list = []
+            if isinstance(data, dict):
+                # Przejście przez zagnieżdżone sekcje HockeyTech
+                def extract_teams(obj):
+                    if isinstance(obj, dict):
+                        if "team_name" in obj or "name" in obj:
+                            teams_list.append(obj)
+                        for k, v in obj.items():
+                            extract_teams(v)
+                    elif isinstance(obj, list):
+                        for item in obj:
+                            extract_teams(item)
+                extract_teams(data)
+                
+            for t in teams_list:
+                name = t.get("team_name", t.get("name", ""))
+                if name:
+                    wins = float(t.get("wins", t.get("w", 20)))
+                    losses = float(t.get("losses", t.get("l", 20)))
+                    ot_losses = float(t.get("ot_losses", t.get("ot", 5)))
+                    tot_g = wins + losses + ot_losses
+                    win_pct = (wins / tot_g) if tot_g > 0 else 0.5
+                    
+                    gf = float(t.get("goals_for", t.get("gf", 100)))
+                    ga = float(t.get("goals_against", t.get("ga", 100)))
+                    gf_g = (gf / tot_g) if tot_g > 0 else 3.0
+                    ga_g = (ga / tot_g) if tot_g > 0 else 3.0
+                    
+                    stats_dict[name] = {
+                        "win_pct": win_pct,
+                        "gf_g": gf_g,
+                        "ga_g": ga_g
+                    }
+            return stats_dict
+    except Exception:
+        pass
+    return {}
+
+ahl_stats_cache = fetch_ahl_live_stats()
 
 # --- MODUŁ POBIERANIA STATYSTYK NBA (nba_api) ---
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -226,29 +282,6 @@ def fetch_the_odds_data(discipline_key):
         
     return all_matches
 
-# --- SILNIK XGBOOST ---
-@st.cache_resource
-def init_self_learning_xgboost():
-    np.random.seed(42)
-    n = 8000
-    X = pd.DataFrame({
-        'form_diff': np.random.normal(0, 0.1, n),
-        'home_away_adv': np.random.uniform(0, 0.08, n),
-        'fatigue_diff': np.random.normal(0, 0.08, n),
-        'off_diff': np.random.normal(0, 0.08, n),
-        'def_diff': np.random.normal(0, 0.08, n),
-        'elo_diff': np.random.normal(0, 30, n),
-        'h2h': np.random.uniform(0.3, 0.7, n)
-    })
-    score = (X['form_diff'] * 0.8 + X['elo_diff']/50 * 0.5 + np.random.normal(0, 0.3, n))
-    y = np.where(score > 0, 1, 0)
-    
-    model = xgb.XGBClassifier(n_estimators=80, max_depth=3, learning_rate=0.02, random_state=42)
-    model.fit(X, y)
-    return model
-
-model = init_self_learning_xgboost()
-
 # --- PANEL BOCZNY ---
 with st.sidebar:
     st.markdown("### 🎯 Maksbet.app")
@@ -258,7 +291,7 @@ with st.sidebar:
     discipline = st.selectbox("Dyscyplina", ["🏀 NBA Koszykówka", "🏒 NHL Hokej", "🏒 AHL Hokej"])
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
-    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.5, max_value=15.0, value=2.0, step=0.5) / 100.0
+    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.5, max_value=15.0, value=1.5, step=0.5) / 100.0
     
     st.markdown("---")
     current_weights = get_adaptive_weights(discipline)
@@ -296,55 +329,45 @@ analyzed_matches = []
 for m in raw_matches:
     match_id = m['id']
     match_name = f"{m['home']} vs {m['away']}"
-    
-    # 1. POBIERANIE REALNYCH STATYSTYK Z DOPASOWANIEM NAZW (FUZZY MATCHING)
-    if "NBA" in discipline:
-        h_stats = find_best_stats_match(m['home'], nba_stats_cache) or {"win_pct": 0.50}
-        a_stats = find_best_stats_match(m['away'], nba_stats_cache) or {"win_pct": 0.50}
-        
-        form_diff_val = h_stats["win_pct"] - a_stats["win_pct"]
-        off_diff_val = form_diff_val * 0.3
-        def_diff_val = -form_diff_val * 0.3
-        elo_diff_val = form_diff_val * 40.0
-    elif "NHL" in discipline:
-        h_stats = find_best_stats_match(m['home'], nhl_stats_cache) or {"win_pct": 0.50, "gf_g": 3.0, "ga_g": 3.0}
-        a_stats = find_best_stats_match(m['away'], nhl_stats_cache) or {"win_pct": 0.50, "gf_g": 3.0, "ga_g": 3.0}
-        
-        form_diff_val = h_stats["win_pct"] - a_stats["win_pct"]
-        off_diff_val = (h_stats["gf_g"] - a_stats["gf_g"]) / 5.0
-        def_diff_val = (a_stats["ga_g"] - h_stats["ga_g"]) / 5.0
-        elo_diff_val = (off_diff_val + def_diff_val + form_diff_val) * 20.0
-    else: # AHL - Czysty model rynkowo-statystyczny No-Vig
-        # Obliczenie czystego prawdopodobieństwa No-Vig z kursów bukmachera jako solidna baza dla AHL
-        prob_raw_h = 1.0 / m['odds_home'] if m['odds_home'] > 0 else 0.5
-        prob_raw_a = 1.0 / m['odds_away'] if m['odds_away'] > 0 else 0.5
-        tot_v = prob_raw_h + prob_raw_a
-        implied_h = prob_raw_h / tot_v if tot_v > 0 else 0.5
-        
-        form_diff_val = (implied_h - 0.5) * 0.5
-        off_diff_val = form_diff_val * 0.3
-        def_diff_val = -form_diff_val * 0.3
-        elo_diff_val = form_diff_val * 30.0
-
-    features = pd.DataFrame([[
-        form_diff_val, 
-        0.04, 
-        0.0,
-        off_diff_val,
-        def_diff_val,
-        elo_diff_val,
-        0.50 + (form_diff_val * 0.2)
-    ]], columns=['form_diff', 'home_away_adv', 'fatigue_diff', 'off_diff', 'def_diff', 'elo_diff', 'h2h'])
-    
-    # 2. WYCENA PREDIKCYJNA MODELU
-    raw_ai_prob = float(model.predict_proba(features)[0][1])
-    ai_prob_home = np.clip(raw_ai_prob, 0.15, 0.85)
-    ai_prob_away = 1.0 - ai_prob_home
-    
     odds_home = m['odds_home']
     odds_away = m['odds_away']
     
-    # 3. WYKRYWANIE SWOBODNEGO VALUE (BEZ SZTYWNYCH OGRANICZEŃ GÓRNYCH)
+    # 1. CZYSTE PRAWDOPODOBIEŃSTWO RYNKOWE (NO-VIG) JAKO BAZA
+    prob_raw_h = 1.0 / odds_home if odds_home > 0 else 0.5
+    prob_raw_a = 1.0 / odds_away if odds_away > 0 else 0.5
+    tot_v = prob_raw_h + prob_raw_a
+    implied_h = prob_raw_h / tot_v if tot_v > 0 else 0.5
+    
+    # 2. OBLICZANIE DELTY STATYSTYCZNEJ Z OFICJALNYCH ŹRÓDEŁ
+    stat_delta = 0.0
+    
+    if "NBA" in discipline:
+        h_stats = find_best_stats_match(m['home'], nba_stats_cache)
+        a_stats = find_best_stats_match(m['away'], nba_stats_cache)
+        if h_stats and a_stats:
+            win_diff = h_stats["win_pct"] - a_stats["win_pct"]
+            stat_delta = win_diff * 0.08
+    elif "NHL" in discipline:
+        h_stats = find_best_stats_match(m['home'], nhl_stats_cache)
+        a_stats = find_best_stats_match(m['away'], nhl_stats_cache)
+        if h_stats and a_stats:
+            win_diff = h_stats["win_pct"] - a_stats["win_pct"]
+            gf_diff = (h_stats["gf_g"] - a_stats["gf_g"]) / 5.0
+            ga_diff = (a_stats["ga_g"] - h_stats["ga_g"]) / 5.0
+            stat_delta = (win_diff * 0.04) + (gf_diff * 0.02) + (ga_diff * 0.02)
+    else: # AHL - Oficjalne HockeyTech API
+        h_stats = find_best_stats_match(m['home'], ahl_stats_cache)
+        a_stats = find_best_stats_match(m['away'], ahl_stats_cache)
+        if h_stats and a_stats:
+            win_diff = h_stats["win_pct"] - a_stats["win_pct"]
+            gf_diff = (h_stats["gf_g"] - a_stats["gf_g"]) / 5.0
+            ga_diff = (a_stats["ga_g"] - h_stats["ga_g"]) / 5.0
+            stat_delta = (win_diff * 0.04) + (gf_diff * 0.02) + (ga_diff * 0.02)
+            
+    # 3. OSTATECZNE PRAWDOPODOBIEŃSTWO AI
+    ai_prob_home = np.clip(implied_h + stat_delta, 0.15, 0.85)
+    ai_prob_away = 1.0 - ai_prob_home
+    
     edge_home = (ai_prob_home * odds_home) - 1.0
     edge_away = (ai_prob_away * odds_away) - 1.0
     
@@ -357,7 +380,7 @@ for m in raw_matches:
         best_pick = m['away']
         best_prob = ai_prob_away
         best_odds = odds_away
-        best_edge = edge_edge = edge_away
+        best_edge = edge_away
     
     b = best_odds - 1.0
     p = best_prob
@@ -392,7 +415,7 @@ tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value", "📁 Rejestr, ROI & Heatmapa
 
 with tab1:
     st.subheader(f"Terminal Analityczny: {discipline}")
-    st.caption("Źródło: Direct API Stats + Fuzzy Team Matching & XGBoost Model")
+    st.caption("Źródło: Oficjalne API (NBA / NHL / AHL HockeyTech) + Fuzzy Team Matching")
     
     if not analyzed_matches:
         st.warning("Brak nadchodzących spotkań w najbliższych 72h spełniających kryteria rynkowe.")
@@ -486,4 +509,3 @@ with tab3:
             x='date:T', y='cumulative_profit:Q', tooltip=['date', 'cumulative_profit']
         ).properties(height=350)
         st.altair_chart(chart, use_container_width=True)
-        
