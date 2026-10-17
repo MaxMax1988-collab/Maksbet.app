@@ -4,3 +4,5 @@ numpy
 xgboost
 requests
 scikit-learn
+nba_api
+altair
