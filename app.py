@@ -216,12 +216,8 @@ with st.sidebar:
     cursor.execute("SELECT COUNT(*) FROM bets")
     total_tracked = cursor.fetchone()[0]
     st.metric("Monitorowane zakłady", total_tracked)
-    
-    # DIAGNOSTYKA ŹRÓDŁA DANYCH
-    if "AHL" in discipline:
-        st.info(f"Pobrano drużyn AHL w cache: {len(ahl_stats_cache)}")
 
-# --- POBIERANIE DANYCH Z THE ODDS API ---
+# --- POBIERANIE KURSÓW Z THE ODDS API ---
 if "NBA" in discipline:
     key = "basketball_nba"
 elif "NHL" in discipline:
@@ -229,9 +225,6 @@ elif "NHL" in discipline:
 else:
     key = "icehockey_ahl"
 
-raw_matches = fetch_the_odds_data(key) if 'fetch_the_odds_data' in globals() else []
-
-# Jeśli funkcja pobierania nie była zdefiniowana w locie, wklejam pełny handler odpytywania
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_odds(d_key):
     url = f"{ODDS_BASE_URL}/{d_key}/odds"
@@ -271,30 +264,30 @@ for m in raw_matches:
     match_name = f"{m['home']} vs {m['away']}"
     odds_home, odds_away = m['odds_home'], m['odds_away']
     
-    # Baza No-Vig
+    # 1. Czyste No-Vig jako silna baza rynkowa
     prob_raw_h = 1.0 / odds_home if odds_home > 0 else 0.5
     prob_raw_a = 1.0 / odds_away if odds_away > 0 else 0.5
     tot_v = prob_raw_h + prob_raw_a
     implied_h = prob_raw_h / tot_v if tot_v > 0 else 0.5
     
-    # Delta statystyczna z twardym zakresem bezpieczeństwa (Max ±2%)
+    # 2. Bardzo konserwatywna delta (maksymalnie rzędu ±1.5% szans)
     stat_delta = 0.0
     if "NBA" in discipline:
         h_s = find_best_stats_match(m['home'], nba_stats_cache)
         a_s = find_best_stats_match(m['away'], nba_stats_cache)
-        if h_s and a_s: stat_delta = np.clip((h_s["win_pct"] - a_s["win_pct"]) * 0.02, -0.02, 0.02)
+        if h_s and a_s: stat_delta = np.clip((h_s["win_pct"] - a_s["win_pct"]) * 0.015, -0.015, 0.015)
     elif "NHL" in discipline:
         h_s = find_best_stats_match(m['home'], nhl_stats_cache)
         a_s = find_best_stats_match(m['away'], nhl_stats_cache)
         if h_s and a_s:
             wd = h_s["win_pct"] - a_s["win_pct"]
-            stat_delta = np.clip(wd * 0.015, -0.02, 0.02)
-    else: # AHL - Silne zacieśnienie do bazy rynkowej
+            stat_delta = np.clip(wd * 0.01, -0.01, 0.01)
+    else: # AHL - Maksymalnie ścisłe tłumienie (brak sztucznych pompowani)
         h_s = find_best_stats_match(m['home'], ahl_stats_cache)
         a_s = find_best_stats_match(m['away'], ahl_stats_cache)
         if h_s and a_s:
             wd = h_s["win_pct"] - a_s["win_pct"]
-            stat_delta = np.clip(wd * 0.01, -0.015, 0.015)
+            stat_delta = np.clip(wd * 0.005, -0.008, 0.008)
             
     ai_prob_home = np.clip(implied_h + stat_delta, 0.15, 0.85)
     ai_prob_away = 1.0 - ai_prob_home
@@ -306,6 +299,9 @@ for m in raw_matches:
         best_pick, best_prob, best_odds, best_edge = m['home'], ai_prob_home, odds_home, edge_home
     else:
         best_pick, best_prob, best_odds, best_edge = m['away'], ai_prob_away, odds_away, edge_away
+    
+    # TWARDY CEILING (HARD CAP): Żadne Value w hokeju nie może przekraczać 6.5%
+    best_edge = min(best_edge, 0.065)
     
     b = best_odds - 1.0
     kelly_f = (b * best_prob - (1.0 - best_prob)) / b if b > 0 else 0
@@ -332,7 +328,7 @@ tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value", "📁 Rejestr, ROI & Heatmapa
 
 with tab1:
     st.subheader(f"Terminal Analityczny: {discipline}")
-    st.caption("Źródło: Oficjalne API + Rynek No-Vig Strict Anchoring")
+    st.caption("Źródło: Oficjalne API + Strict Market Anchoring & Hard Cap 6.5%")
     
     if not analyzed_matches:
         st.warning("Brak nadchodzących spotkań spełniających kryteria rynkowe.")
@@ -366,4 +362,4 @@ with tab3:
         df_bets['cumulative_profit'] = df_bets['profit'].cumsum() + bankroll
         chart = alt.Chart(df_bets).mark_line(strokeWidth=3, color='#34d399').encode(x='date:T', y='cumulative_profit:Q').properties(height=350)
         st.altair_chart(chart, use_container_width=True)
-                
+    
