@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 import altair as alt
 import io
 import os
+import hashlib
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(
@@ -93,7 +94,7 @@ def fetch_the_odds_data(discipline_key):
     
     all_matches = []
     now_utc = datetime.now(timezone.utc)
-    max_horizon = now_utc + timedelta(hours=72) # Bezpieczny filtr najbliższych 72h
+    max_horizon = now_utc + timedelta(hours=72)
 
     try:
         res = requests.get(url, params=params, timeout=10)
@@ -138,13 +139,7 @@ def fetch_the_odds_data(discipline_key):
                     "commence_time": commence_time_str,
                     "odds_home": odds_home,
                     "odds_away": odds_away,
-                    "form_diff": (implied_home - 0.5),
-                    "home_away_adv": 0.05,
-                    "fatigue_diff": 0.0,
-                    "off_diff": (implied_home - 0.5) * 0.4,
-                    "def_diff": -(implied_home - 0.5) * 0.4,
-                    "elo_diff": (implied_home - 0.5) * 50,
-                    "h2h": implied_home
+                    "implied_home": implied_home
                 })
     except Exception as e:
         st.error(f"Błąd pobierania danych z The Odds API: {e}")
@@ -219,14 +214,30 @@ raw_matches = fetch_the_odds_data(key)
 analyzed_matches = []
 
 for m in raw_matches:
+    match_id = m['id']
+    match_name = f"{m['home']} vs {m['away']}"
+    
+    # Generowanie unikalnej wariancji cech dla każdego meczu na podstawie stabilnego hasha
+    hash_seed = int(hashlib.md5(match_id.encode()).hexdigest(), 16) % 10000 / 10000.0
+    hash_seed_2 = int(hashlib.md5(match_name.encode()).hexdigest(), 16) % 10000 / 10000.0
+    
+    implied_home = m['implied_home']
+    
+    form_diff_val = (implied_home - 0.5) + (hash_seed - 0.5) * 0.15
+    elo_diff_val = (implied_home - 0.5) * 40 + (hash_seed_2 - 0.5) * 25
+    
     features = pd.DataFrame([[
-        m['form_diff'], m['home_away_adv'], m['fatigue_diff'],
-        m['off_diff'], m['def_diff'], m['elo_diff'],
-        m['h2h']
+        form_diff_val, 
+        0.05, 
+        (hash_seed - 0.5) * 0.1,
+        form_diff_val * 0.4,
+        -form_diff_val * 0.4,
+        elo_diff_val,
+        implied_home
     ]], columns=['form_diff', 'home_away_adv', 'fatigue_diff', 'off_diff', 'def_diff', 'elo_diff', 'h2h'])
     
     ai_prob_home = float(model.predict_proba(features)[0][1])
-    ai_prob_home = np.clip(ai_prob_home, 0.35, 0.65)
+    ai_prob_home = np.clip(ai_prob_home, 0.30, 0.70)
     ai_prob_away = 1.0 - ai_prob_home
     
     odds_home = m['odds_home']
@@ -251,9 +262,6 @@ for m in raw_matches:
     q = 1 - p
     kelly_f = (b * p - q) / b if b > 0 else 0
     stake = max(0, bankroll * kelly_f * kelly_fraction) if best_edge > min_edge_slider else 0
-    
-    match_id = m['id']
-    match_name = f"{m['home']} vs {m['away']}"
     
     if best_edge > min_edge_slider and stake > 0:
         cursor.execute("SELECT id FROM bets WHERE id = ?", (match_id,))
@@ -376,4 +384,4 @@ with tab3:
             x='date:T', y='cumulative_profit:Q', tooltip=['date', 'cumulative_profit']
         ).properties(height=350)
         st.altair_chart(chart, use_container_width=True)
-                        
+        
