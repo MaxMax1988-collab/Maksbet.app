@@ -72,12 +72,12 @@ db_conn = init_db()
 # --- ADAPTIVE TEMPORAL WEIGHTING ENGINE ---
 def get_adaptive_weights(discipline_name):
     current_month = datetime.now().month
-    if discipline_name == "🏀 NBA Koszykówka":
+    if "NBA" in discipline_name:
         if current_month in [10, 11, 12]:
             return {"Zgranie / Net Rating": 0.25, "Forma Ostatnich Meczów": 0.15, "Przewaga Dom/Wyjazd": 0.15, "Siła Ataku": 0.20, "Siła Obrony": 0.15, "Ranking Elo": 0.10}
         else:
             return {"Zmęczenie / Terminarz": 0.30, "Forma Ostatnich Meczów": 0.20, "Siła Obrony": 0.20, "Przewaga Dom/Wyjazd": 0.12, "Ranking Elo": 0.10, "H2H": 0.08}
-    else:
+    else: # Hokej (NHL / AHL)
         return {"Forma Ostatnich Meczów": 0.18, "Przewaga Dom/Wyjazd": 0.12, "Zmęczenie / Terminarz": 0.20, "Siła Ataku": 0.16, "Siła Obrony": 0.22, "Ranking Elo": 0.08, "H2H": 0.04}
 
 # --- POBIERANIE DANYCH Z THE ODDS API (Z FILTREM 72H) ---
@@ -180,14 +180,14 @@ with st.sidebar:
     st.caption("Autonomous Quant Engine")
     st.markdown("---")
     
-    discipline = st.selectbox("Dyscyplina", ["🏀 NBA Koszykówka", "🏒 NHL Hokej"])
+    discipline = st.selectbox("Dyscyplina", ["🏀 NBA Koszykówka", "🏒 NHL Hokej", "🏒 AHL Hokej"])
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
     min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.5, max_value=15.0, value=2.0, step=0.5) / 100.0
     
     st.markdown("---")
     current_weights = get_adaptive_weights(discipline)
-    st.markdown(f"**🧠 Adaptacyjne Wagi AI ({discipline})**")
+    st.markdown(f"**🧠 Adaptacyjne Wagi AI**")
     for feature_name, weight_val in current_weights.items():
         st.text(f"{feature_name}: {int(weight_val*100)}%")
         st.progress(weight_val)
@@ -207,8 +207,14 @@ with st.sidebar:
                 mime="application/x-sqlite3"
             )
 
-# --- POBIERANIE I ANALIZA ---
-key = "basketball_nba" if "NBA" in discipline else "icehockey_nhl"
+# --- WYBÓR KLUCZA API DLA DYSCYPLINY ---
+if "NBA" in discipline:
+    key = "basketball_nba"
+elif "NHL" in discipline:
+    key = "icehockey_nhl"
+else:
+    key = "icehockey_ahl"
+
 raw_matches = fetch_the_odds_data(key)
 analyzed_matches = []
 
@@ -370,4 +376,4 @@ with tab3:
             x='date:T', y='cumulative_profit:Q', tooltip=['date', 'cumulative_profit']
         ).properties(height=350)
         st.altair_chart(chart, use_container_width=True)
-        
+                        
