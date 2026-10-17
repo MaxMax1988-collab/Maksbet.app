@@ -164,7 +164,6 @@ def fetch_nfl_stats():
                     name = team_info.get("displayName", "")
                     nickname = team_info.get("name", "")
                     
-                    # Wyciąganie statystyk z rzędów tabeli
                     stats = team_entry.get("stats", [])
                     wins, losses = 0, 0
                     point_diff = 0.0
@@ -264,7 +263,7 @@ for m in raw_matches:
     implied_h = prob_raw_h / tot_v if tot_v > 0 else 0.5
     no_vig_sum = implied_h + (1.0 - implied_h)
     
-    # 2. Korekta statystyczna z uwzględnieniem wag
+    # 2. Dynamiczna korekta statystyczna z odpowiednią czułością dla każdej dyscypliny
     w = curr_weights
     stat_delta = 0.0
     
@@ -272,19 +271,21 @@ for m in raw_matches:
         h_s, a_s = nba_stats_cache.get(m['home']), nba_stats_cache.get(m['away'])
         if h_s and a_s:
             wd = h_s["win_pct"] - a_s["win_pct"]
-            stat_delta = wd * (w["win_pct"] * 0.02 + w["advanced"] * 0.02)
+            stat_delta = wd * (w["win_pct"] * 0.08 + w["advanced"] * 0.05)
+            
     elif "NHL" in discipline:
         h_s, a_s = nhl_stats_cache.get(m['home']), nhl_stats_cache.get(m['away'])
         if h_s and a_s:
             wd = h_s["win_pct"] - a_s["win_pct"]
-            gf_diff = (h_s["gf_g"] - a_s["gf_g"]) / 10.0
-            stat_delta = (wd * w["win_pct"] * 0.02) + (gf_diff * w["advanced"] * 0.02)
-    else: # NFL (ESPN Stats)
+            gf_diff = (h_s["gf_g"] - a_s["gf_g"]) / 5.0
+            stat_delta = (wd * w["win_pct"] * 0.08) + (gf_diff * w["advanced"] * 0.08)
+            
+    else: # NFL
         h_s, a_s = nfl_stats_cache.get(m['home']), nfl_stats_cache.get(m['away'])
         if h_s and a_s:
             wd = h_s["win_pct"] - a_s["win_pct"]
-            pd_diff = (h_s["point_diff"] - a_s["point_diff"]) / 100.0
-            stat_delta = (wd * w["win_pct"] * 0.02) + (pd_diff * w["advanced"] * 0.02)
+            pd_diff = (h_s["point_diff"] - a_s["point_diff"]) / 50.0
+            stat_delta = (wd * w["win_pct"] * 0.08) + (pd_diff * w["advanced"] * 0.08)
         
     ai_prob_home = np.clip(implied_h + stat_delta, 0.05, 0.95)
     ai_prob_away = 1.0 - ai_prob_home
@@ -301,7 +302,7 @@ for m in raw_matches:
     kelly_f = (b * best_prob - (1.0 - best_prob)) / b if b > 0 else 0
     stake = max(0, bankroll * kelly_f * kelly_fraction)
     
-    # --- ŻELAZNY WARUNEK: TYLKO PRAWDZIWE, DODATNIE VALUE ---
+    # --- ŻELAZNY FILTR VALUE ---
     if best_edge >= min_edge_slider and stake > 0:
         cursor.execute("SELECT id FROM bets WHERE id = ?", (match_id,))
         if not cursor.fetchone():
@@ -436,4 +437,4 @@ with tab4:
         df_bets['cumulative_profit'] = df_bets['profit'].cumsum() + bankroll
         chart = alt.Chart(df_bets).mark_line(strokeWidth=3, color='#34d399').encode(x='date:T', y='cumulative_profit:Q').properties(height=350)
         st.altair_chart(chart, use_container_width=True)
-    
+            
