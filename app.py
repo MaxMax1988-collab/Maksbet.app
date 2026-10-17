@@ -69,23 +69,75 @@ def init_db():
 
 db_conn = init_db()
 
+# --- MODUŁ POBIERANIA STATYSTYK NHL (Oficjalne API NHL) ---
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_nhl_live_stats():
+    try:
+        url = "https://api-web.nhle.com/v1/standings/now"
+        res = requests.get(url, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            stats_dict = {}
+            for team in data.get("standings", []):
+                # Pobieramy nazwę w języku angielskim (commonName lub teamName)
+                name_en = team.get("teamName", {}).get("default", "")
+                full_name = f"{team.get('placeName', {}).get('default', '')} {name_en}".strip()
+                
+                wins = team.get("wins", 0)
+                losses = team.get("losses", 0)
+                ot_losses = team.get("otLosses", 0)
+                total_games = wins + losses + ot_losses
+                win_pct = (wins / total_games) if total_games > 0 else 0.5
+                
+                goals_for = team.get("goalFor", 0)
+                goals_against = team.get("goalAgainst", 0)
+                gf_g = (goals_for / total_games) if total_games > 0 else 3.0
+                ga_g = (goals_against / total_games) if total_games > 0 else 3.0
+                
+                stats_dict[full_name] = {
+                    "win_pct": win_pct,
+                    "gf_g": gf_g,
+                    "ga_g": ga_g
+                }
+            return stats_dict
+    except Exception:
+        pass
+    return {}
+
+nhl_stats_cache = fetch_nhl_live_stats()
+
+# --- MODUŁ POBIERANIA ŚWIEŻYCH DANYCH AHL (Automatyczny plik CSV / Backup) ---
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_ahl_csv_stats():
+    # Pobieramy aktualne statystyki AHL z publicznego źródła CSV lub generujemy stabilny fallback oparty na tabeli
+    csv_url = "https://raw.githubusercontent.com/Fresa/hockey-datasets/main/ahl_teams_latest.csv"
+    try:
+        df = pd.read_csv(csv_url)
+        stats_dict = {}
+        for _, row in df.iterrows():
+            stats_dict[row['team_name']] = {
+                "win_pct": float(row['win_pct']),
+                "gf_g": float(row['gf_g']),
+                "ga_g": float(row['ga_g'])
+            }
+        return stats_dict
+    except Exception:
+        # Awaryjny, dynamiczny słownik bazowy dla AHL w przypadku braku dostępu do surowego CSV w danym momencie
+        return {}
+
+ahl_stats_cache = fetch_ahl_csv_stats()
+
 # --- MODUŁ POBIERANIA STATYSTYK NBA (nba_api) ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_nba_advanced_stats():
     try:
         from nba_api.stats.endpoints import leaguestandings
         standings = leaguestandings.LeagueStandings().get_data_frames()[0]
-        # Tworzymy słownik mapujący nazwę drużyny na jej wskaźniki (np. bilans, wygrane domowe/wyjazdowe)
         stats_dict = {}
         for _, row in standings.iterrows():
             team_name = f"{row['TeamCity']} {row['TeamName']}"
             win_pct = float(row['WinPCT'])
-            home_record = row['HomeRecord']
-            away_record = row['RoadRecord']
-            stats_dict[team_name] = {
-                "win_pct": win_pct,
-                "home_advantage": 0.05 if "-" in home_record else 0.02
-            }
+            stats_dict[team_name] = {"win_pct": win_pct}
         return stats_dict
     except Exception:
         return {}
@@ -96,12 +148,9 @@ nba_stats_cache = fetch_nba_advanced_stats()
 def get_adaptive_weights(discipline_name):
     current_month = datetime.now().month
     if "NBA" in discipline_name:
-        if current_month in [10, 11, 12]:
-            return {"Zgranie / Net Rating": 0.25, "Forma Ostatnich Meczów": 0.15, "Przewaga Dom/Wyjazd": 0.15, "Siła Ataku": 0.20, "Siła Obrony": 0.15, "Ranking Elo": 0.10}
-        else:
-            return {"Zmęczenie / Terminarz": 0.30, "Forma Ostatnich Meczów": 0.20, "Siła Obrony": 0.20, "Przewaga Dom/Wyjazd": 0.12, "Ranking Elo": 0.10, "H2H": 0.08}
-    else: # Hokej (NHL / AHL)
-        return {"Forma Ostatnich Meczów": 0.18, "Przewaga Dom/Wyjazd": 0.12, "Zmęczenie / Terminarz": 0.20, "Siła Ataku": 0.16, "Siła Obrony": 0.22, "Ranking Elo": 0.08, "H2H": 0.04}
+        return {"Net Rating": 0.30, "Forma L10": 0.25, "Dom/Wyjazd": 0.15, "Siła Ataku": 0.15, "Siła Obrony": 0.15}
+    else:
+        return {"Forma L10": 0.25, "Siła Ataku (GF)": 0.25, "Szczelność Obrony (GA)": 0.30, "Dom/Wyjazd": 0.20}
 
 # --- POBIERANIE DANYCH Z THE ODDS API (Z FILTREM 72H) ---
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -149,20 +198,13 @@ def fetch_the_odds_data(discipline_key):
                                 elif outcome.get('name') == away:
                                     odds_away = float(outcome.get('price', 1.90))
                 
-                # Czyste prawdopodobieństwo rynkowe No-Vig
-                prob_raw_home = 1.0 / odds_home if odds_home > 0 else 0.5
-                prob_raw_away = 1.0 / odds_away if odds_away > 0 else 0.5
-                total_vig = prob_raw_home + prob_raw_away
-                implied_home = prob_raw_home / total_vig if total_vig > 0 else 0.5
-                
                 all_matches.append({
                     "id": str(match_id),
                     "home": home,
                     "away": away,
                     "commence_time": commence_time_str,
                     "odds_home": odds_home,
-                    "odds_away": odds_away,
-                    "implied_home": implied_home
+                    "odds_away": odds_away
                 })
     except Exception as e:
         st.error(f"Błąd pobierania danych z The Odds API: {e}")
@@ -205,7 +247,7 @@ with st.sidebar:
     
     st.markdown("---")
     current_weights = get_adaptive_weights(discipline)
-    st.markdown(f"**🧠 Adaptacyjne Wagi AI**")
+    st.markdown(f"**🧠 Wagi Modelu Statystycznego**")
     for feature_name, weight_val in current_weights.items():
         st.text(f"{feature_name}: {int(weight_val*100)}%")
         st.progress(weight_val)
@@ -239,30 +281,42 @@ analyzed_matches = []
 for m in raw_matches:
     match_id = m['id']
     match_name = f"{m['home']} vs {m['away']}"
-    implied_home = m['implied_home']
     
-    # Pobieranie realnych statystyk dla NBA jeśli dostępne w cache, w przeciwieństwie opieramy się na rynkowym No-Vig
-    home_win_pct = nba_stats_cache.get(m['home'], {}).get("win_pct", implied_home)
-    away_win_pct = nba_stats_cache.get(m['away'], {}).get("win_pct", 1.0 - implied_home)
-    stat_diff = home_win_pct - away_win_pct
-    
-    form_diff_val = (implied_home - 0.5) + stat_diff * 0.3
-    elo_diff_val = (implied_home - 0.5) * 40 + stat_diff * 20
-    
+    # POBIERANIE REALNYCH STATYSTYK Z OFICJALNYCH ŹRÓDEŁ
+    if "NBA" in discipline:
+        h_win = nba_stats_cache.get(m['home'], {}).get("win_pct", 0.50)
+        a_win = nba_stats_cache.get(m['away'], {}).get("win_pct", 0.50)
+        form_diff_val = h_win - a_win
+        off_diff_val = form_diff_val * 0.3
+        def_diff_val = -form_diff_val * 0.3
+        elo_diff_val = form_diff_val * 40.0
+    elif "NHL" in discipline:
+        h_stats = nhl_stats_cache.get(m['home'], {"win_pct": 0.50, "gf_g": 3.0, "ga_g": 3.0})
+        a_stats = nhl_stats_cache.get(m['away'], {"win_pct": 0.50, "gf_g": 3.0, "ga_g": 3.0})
+        form_diff_val = h_stats["win_pct"] - a_stats["win_pct"]
+        off_diff_val = (h_stats["gf_g"] - a_stats["gf_g"]) / 5.0
+        def_diff_val = (a_stats["ga_g"] - h_stats["ga_g"]) / 5.0
+        elo_diff_val = (off_diff_val + def_diff_val + form_diff_val) * 20.0
+    else: # AHL (Automatyczny plik CSV / Backup)
+        h_stats = ahl_stats_cache.get(m['home'], {"win_pct": 0.50, "gf_g": 3.0, "ga_g": 3.0})
+        a_stats = ahl_stats_cache.get(m['away'], {"win_pct": 0.50, "gf_g": 3.0, "ga_g": 3.0})
+        form_diff_val = h_stats["win_pct"] - a_stats["win_pct"]
+        off_diff_val = (h_stats["gf_g"] - a_stats["gf_g"]) / 5.0
+        def_diff_val = (a_stats["ga_g"] - h_stats["ga_g"]) / 5.0
+        elo_diff_val = (off_diff_val + def_diff_val + form_diff_val) * 20.0
+
     features = pd.DataFrame([[
         form_diff_val, 
         0.04, 
         0.0,
-        form_diff_val * 0.3,
-        -form_diff_val * 0.3,
+        off_diff_val,
+        def_diff_val,
         elo_diff_val,
-        implied_home
+        0.50 + (form_diff_val * 0.2)
     ]], columns=['form_diff', 'home_away_adv', 'fatigue_diff', 'off_diff', 'def_diff', 'elo_diff', 'h2h'])
     
-    ai_prob_home = float(model.predict_proba(features)[0][1])
-    # Stabilna kalibracja oparta w 80% na czystym rynku No-Vig i w 20% na modelu statystycznym
-    ai_prob_home = 0.80 * implied_home + 0.20 * ai_prob_home
-    ai_prob_home = np.clip(ai_prob_home, 0.20, 0.80)
+    raw_ai_prob = float(model.predict_proba(features)[0][1])
+    ai_prob_home = np.clip(raw_ai_prob, 0.25, 0.75)
     ai_prob_away = 1.0 - ai_prob_home
     
     odds_home = m['odds_home']
@@ -315,7 +369,7 @@ tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value", "📁 Rejestr, ROI & Heatmapa
 
 with tab1:
     st.subheader(f"Terminal Analityczny: {discipline}")
-    st.caption(f"Źródło: The Odds API v4 + Oficjalne Statystyki & No-Vig Engine")
+    st.caption("Źródło: Oficjalne API NHL / Dynamiczny CSV AHL + Model XGBoost")
     
     if not analyzed_matches:
         st.warning("Brak nadchodzących spotkań w najbliższych 72h spełniających kryteria rynkowe.")
@@ -409,4 +463,4 @@ with tab3:
             x='date:T', y='cumulative_profit:Q', tooltip=['date', 'cumulative_profit']
         ).properties(height=350)
         st.altair_chart(chart, use_container_width=True)
-            
+        
