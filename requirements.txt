@@ -6,3 +6,4 @@ requests
 scikit-learn
 nba_api
 altair
+nhl-api-py
