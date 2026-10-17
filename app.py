@@ -5,9 +5,6 @@ import requests
 import sqlite3
 from datetime import datetime, timezone, timedelta
 import altair as alt
-import io
-import os
-import re
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(
@@ -37,7 +34,6 @@ def init_db():
     conn = sqlite3.connect("bets_database.db", check_same_thread=False)
     cursor = conn.cursor()
     
-    # Tabela zakładów
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS bets (
             id TEXT PRIMARY KEY,
@@ -56,7 +52,6 @@ def init_db():
         )
     ''')
     
-    # Tabela uczenia się wag
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS weights_history (
             sport TEXT PRIMARY KEY,
@@ -67,7 +62,6 @@ def init_db():
         )
     ''')
     
-    # Domyślne wagi początkowe (Baseline)
     default_weights = {
         "🏀 NBA Koszykówka": (0.25, 0.35, 0.25, 0.15),
         "🏒 NHL Hokej": (0.30, 0.35, 0.20, 0.15),
@@ -98,15 +92,11 @@ def get_sport_weights(sport_name):
 def update_weights_after_settlement(sport_name, bet_won):
     cursor = db_conn.cursor()
     w = get_sport_weights(sport_name)
-    
-    # Drobny krok uczenia (Learning Rate)
     lr = 0.01 if bet_won else -0.01
     
-    # Nagradzamy/karamy wagi zaawansowane oraz formę
     new_adv = max(0.10, w["advanced"] + lr)
     new_form = max(0.10, w["form"] + (lr * 0.5))
     
-    # Renormalizacja do sumy 1.0 (100%)
     total = w["win_pct"] + new_adv + new_form + w["home"]
     
     nw_win = w["win_pct"] / total
@@ -162,8 +152,34 @@ def fetch_nba_stats():
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_nfl_stats():
-    # Szablon otwartego feedu statystyk NFL
-    return {}
+    try:
+        url = "http://site.api.espn.com/apis/v2/sports/football/nfl/standings"
+        res = requests.get(url, timeout=10)
+        stats_dict = {}
+        if res.status_code == 200:
+            data = res.json()
+            for group in data.get("children", []):
+                for team_entry in group.get("standings", {}).get("entries", []):
+                    team_info = team_entry.get("team", {})
+                    name = team_info.get("displayName", "")
+                    nickname = team_info.get("name", "")
+                    
+                    # Wyciąganie statystyk z rzędów tabeli
+                    stats = team_entry.get("stats", [])
+                    wins, losses = 0, 0
+                    point_diff = 0.0
+                    for s in stats:
+                        if s.get("name") == "wins": wins = s.get("value", 0)
+                        if s.get("name") == "losses": losses = s.get("value", 0)
+                        if s.get("name") == "pointDifferential": point_diff = s.get("value", 0.0)
+                        
+                    tot = wins + losses
+                    win_pct = (wins / tot) if tot > 0 else 0.5
+                    stats_dict[name] = {"win_pct": win_pct, "point_diff": point_diff}
+                    stats_dict[nickname] = {"win_pct": win_pct, "point_diff": point_diff}
+        return stats_dict
+    except Exception:
+        return {}
 
 nhl_stats_cache = fetch_nhl_stats()
 nba_stats_cache = fetch_nba_stats()
@@ -180,7 +196,6 @@ with st.sidebar:
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
     min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.5, max_value=10.0, value=1.5, step=0.5) / 100.0
     
-    # Wyświetlenie aktualnych wyuczonych wag
     curr_weights = get_sport_weights(discipline)
     st.markdown("---")
     st.markdown("<b>🧠 Wyuczone Wagi Modelu:</b>", unsafe_allow_html=True)
@@ -249,7 +264,7 @@ for m in raw_matches:
     implied_h = prob_raw_h / tot_v if tot_v > 0 else 0.5
     no_vig_sum = implied_h + (1.0 - implied_h)
     
-    # 2. Obliczenie Delty na podstawie wyuczonych wag
+    # 2. Korekta statystyczna z uwzględnieniem wag
     w = curr_weights
     stat_delta = 0.0
     
@@ -264,10 +279,14 @@ for m in raw_matches:
             wd = h_s["win_pct"] - a_s["win_pct"]
             gf_diff = (h_s["gf_g"] - a_s["gf_g"]) / 10.0
             stat_delta = (wd * w["win_pct"] * 0.02) + (gf_diff * w["advanced"] * 0.02)
-    else: # NFL
-        stat_delta = 0.01 * w["home"]
+    else: # NFL (ESPN Stats)
+        h_s, a_s = nfl_stats_cache.get(m['home']), nfl_stats_cache.get(m['away'])
+        if h_s and a_s:
+            wd = h_s["win_pct"] - a_s["win_pct"]
+            pd_diff = (h_s["point_diff"] - a_s["point_diff"]) / 100.0
+            stat_delta = (wd * w["win_pct"] * 0.02) + (pd_diff * w["advanced"] * 0.02)
         
-    ai_prob_home = np.clip(implied_h + stat_delta, 0.10, 0.90)
+    ai_prob_home = np.clip(implied_h + stat_delta, 0.05, 0.95)
     ai_prob_away = 1.0 - ai_prob_home
     
     edge_home = (ai_prob_home * odds_home) - 1.0
@@ -280,9 +299,10 @@ for m in raw_matches:
     
     b = best_odds - 1.0
     kelly_f = (b * best_prob - (1.0 - best_prob)) / b if b > 0 else 0
-    stake = max(0, bankroll * kelly_f * kelly_fraction) if best_edge > min_edge_slider else 0
+    stake = max(0, bankroll * kelly_f * kelly_fraction)
     
-    if best_edge > min_edge_slider and stake > 0:
+    # --- ŻELAZNY WARUNEK: TYLKO PRAWDZIWE, DODATNIE VALUE ---
+    if best_edge >= min_edge_slider and stake > 0:
         cursor.execute("SELECT id FROM bets WHERE id = ?", (match_id,))
         if not cursor.fetchone():
             cursor.execute(
@@ -291,17 +311,17 @@ for m in raw_matches:
             )
             db_conn.commit()
 
-    m_copy = m.copy()
-    m_copy.update({
-        "best_pick": best_pick, 
-        "ai_prob": best_prob, 
-        "odds": best_odds, 
-        "edge": best_edge, 
-        "stake": round(stake, 2),
-        "implied_h": round(implied_h * 100, 2),
-        "no_vig_sum": round(no_vig_sum, 4)
-    })
-    analyzed_matches.append(m_copy)
+        m_copy = m.copy()
+        m_copy.update({
+            "best_pick": best_pick, 
+            "ai_prob": best_prob, 
+            "odds": best_odds, 
+            "edge": best_edge, 
+            "stake": round(stake, 2),
+            "implied_h": round(implied_h * 100, 2),
+            "no_vig_sum": round(no_vig_sum, 4)
+        })
+        analyzed_matches.append(m_copy)
 
 analyzed_matches.sort(key=lambda x: x['edge'], reverse=True)
 
@@ -314,7 +334,7 @@ with tab1:
     st.caption("Czysty model No-Vig z adaptacyjnymi wagami uczenia")
     
     if not analyzed_matches:
-        st.warning("Brak nadchodzących spotkań w oknie 72h dla tej dyscypliny.")
+        st.warning("Brak nadchodzących spotkań spełniających kryteria dodatniego Value w oknie 72h.")
     else:
         for m in analyzed_matches:
             edge_pct = round(m['edge'] * 100, 1)
@@ -357,7 +377,7 @@ with tab2:
         st.markdown("""
             <div class="test-box">
             <b>[TEST 2] Matematyczna neutralność marży (No-Vig Check):</b><br>
-            Brak meczów do weryfikacji.
+            Brak meczów z dodatnim Value do weryfikacji.
             </div>
         """, unsafe_allow_html=True)
         
@@ -416,4 +436,4 @@ with tab4:
         df_bets['cumulative_profit'] = df_bets['profit'].cumsum() + bankroll
         chart = alt.Chart(df_bets).mark_line(strokeWidth=3, color='#34d399').encode(x='date:T', y='cumulative_profit:Q').properties(height=350)
         st.altair_chart(chart, use_container_width=True)
-        
+    
