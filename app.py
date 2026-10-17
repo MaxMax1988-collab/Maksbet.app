@@ -105,7 +105,7 @@ def fetch_nba_advanced_stats():
 
 nba_stats_cache = fetch_nba_advanced_stats()
 
-# --- PANEL BOCZny ---
+# --- PANEL BOCZNY ---
 with st.sidebar:
     st.markdown("### 🎯 Maksbet.app")
     st.caption("Autonomous Quant Engine (No AHL)")
@@ -150,8 +150,8 @@ def fetch_odds(d_key):
                     for mkt in books[0].get('markets', []):
                         if mkt.get('key') == 'h2h':
                             for out in mkt.get('outcomes', []):
-                                if out.get('name'] == home: oh = float(out.get('price', 1.90))
-                                elif out.get('name'] == away: oa = float(out.get('price', 1.90))
+                                if out.get('name') == home: oh = float(out.get('price', 1.90))
+                                elif out.get('name') == away: oa = float(out.get('price', 1.90))
                 all_m.append({"id": str(match_id), "home": home, "away": away, "commence_time": commence, "odds_home": oh, "odds_away": oa})
     except: pass
     return all_m
@@ -164,16 +164,14 @@ for m in raw_matches:
     match_name = f"{m['home']} vs {m['away']}"
     odds_home, odds_away = m['odds_home'], m['odds_away']
     
-    # 1. Matematycznie czyste No-Vig (usuwanie marży bukmachera)
+    # 1. Matematycznie czyste No-Vig
     prob_raw_h = 1.0 / odds_home if odds_home > 0 else 0.5
     prob_raw_a = 1.0 / odds_away if odds_away > 0 else 0.5
     tot_v = prob_raw_h + prob_raw_a
     implied_h = prob_raw_h / tot_v if tot_v > 0 else 0.5
     
-    # 2. Surowa weryfikacja No-Vig vs Kursy (Sprawdzenie czy suma prawdopodobieństw wynosi 1.0)
     no_vig_sum = implied_h + (1.0 - implied_h)
     
-    # Minimalna korekta statystyczna (maksymalnie ±1%)
     stat_delta = 0.0
     if "NBA" in discipline:
         h_s = nba_stats_cache.get(m['home'])
@@ -252,7 +250,6 @@ with tab2:
     st.subheader("🛡️ Terminal Diagnostyczny i Testy Inżynieryjne")
     st.caption("Ten panel udowadnia, że aplikacja nie halucynuje, lecz wykonuje czyste operacje matematyczne na realnych danych.")
     
-    # TEST 1: The Odds API
     test_api_status = "✅ OK (Połączenie stabilne)" if raw_matches else "❌ Błąd / Brak danych"
     st.markdown(f"""
         <div class="test-box">
@@ -262,7 +259,6 @@ with tab2:
         </div>
     """, unsafe_allow_html=True)
     
-    # TEST 2: No-Vig Mathematics
     sample_check = analyzed_matches[0] if analyzed_matches else None
     if sample_check:
         sample_sum = sample_check['no_vig_sum']
@@ -274,7 +270,6 @@ with tab2:
             </div>
         """, unsafe_allow_html=True)
         
-    # TEST 3: Baza SQLite
     try:
         cursor.execute("SELECT COUNT(*) FROM bets")
         db_count = cursor.fetchone()[0]
@@ -289,7 +284,6 @@ with tab2:
         </div>
     """, unsafe_allow_html=True)
     
-    # TEST 4: Sprawdzenie braku AHL
     st.markdown(f"""
         <div class="test-box">
         <b>[TEST 4] Weryfikacja usunięcia AHL:</b><br>
@@ -311,3 +305,4 @@ with tab4:
         df_bets['cumulative_profit'] = df_bets['profit'].cumsum() + bankroll
         chart = alt.Chart(df_bets).mark_line(strokeWidth=3, color='#34d399').encode(x='date:T', y='cumulative_profit:Q').properties(height=350)
         st.altair_chart(chart, use_container_width=True)
+    
