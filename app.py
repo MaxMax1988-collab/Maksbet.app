@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import xgboost as xgb
 import requests
 import sqlite3
 from datetime import datetime, timezone, timedelta
@@ -151,22 +150,17 @@ def fetch_ahl_live_stats():
         if res.status_code == 200:
             data = res.json()
             stats_dict = {}
-            # Parsowanie struktury HockeyTech dla tabel ligowych
-            sections = data.get("securables", data.get("site_kit", {}).get("standings", []))
-            # Bezpieczne przeszukiwanie obiektów JSON w feedzie HockeyTech
             teams_list = []
-            if isinstance(data, dict):
-                # Przejście przez zagnieżdżone sekcje HockeyTech
-                def extract_teams(obj):
-                    if isinstance(obj, dict):
-                        if "team_name" in obj or "name" in obj:
-                            teams_list.append(obj)
-                        for k, v in obj.items():
-                            extract_teams(v)
-                    elif isinstance(obj, list):
-                        for item in obj:
-                            extract_teams(item)
-                extract_teams(data)
+            def extract_teams(obj):
+                if isinstance(obj, dict):
+                    if "team_name" in obj or "name" in obj:
+                        teams_list.append(obj)
+                    for k, v in obj.items():
+                        extract_teams(v)
+                elif isinstance(obj, list):
+                    for item in obj:
+                        extract_teams(item)
+            extract_teams(data)
                 
             for t in teams_list:
                 name = t.get("team_name", t.get("name", ""))
@@ -338,7 +332,7 @@ for m in raw_matches:
     tot_v = prob_raw_h + prob_raw_a
     implied_h = prob_raw_h / tot_v if tot_v > 0 else 0.5
     
-    # 2. OBLICZANIE DELTY STATYSTYCZNEJ Z OFICJALNYCH ŹRÓDEŁ
+    # 2. BEZPIECZNA, TWARDO OGRANICZONA DELTA STATYSTYCZNA (MAX ±4%)
     stat_delta = 0.0
     
     if "NBA" in discipline:
@@ -346,7 +340,7 @@ for m in raw_matches:
         a_stats = find_best_stats_match(m['away'], nba_stats_cache)
         if h_stats and a_stats:
             win_diff = h_stats["win_pct"] - a_stats["win_pct"]
-            stat_delta = win_diff * 0.08
+            stat_delta = np.clip(win_diff * 0.04, -0.04, 0.04)
     elif "NHL" in discipline:
         h_stats = find_best_stats_match(m['home'], nhl_stats_cache)
         a_stats = find_best_stats_match(m['away'], nhl_stats_cache)
@@ -354,17 +348,20 @@ for m in raw_matches:
             win_diff = h_stats["win_pct"] - a_stats["win_pct"]
             gf_diff = (h_stats["gf_g"] - a_stats["gf_g"]) / 5.0
             ga_diff = (a_stats["ga_g"] - h_stats["ga_g"]) / 5.0
-            stat_delta = (win_diff * 0.04) + (gf_diff * 0.02) + (ga_diff * 0.02)
-    else: # AHL - Oficjalne HockeyTech API
+            raw_delta = (win_diff * 0.02) + (gf_diff * 0.01) + (ga_diff * 0.01)
+            stat_delta = np.clip(raw_delta, -0.04, 0.04)
+    else: # AHL - Bezpieczne tłumienie dla małej próby meczowej
         h_stats = find_best_stats_match(m['home'], ahl_stats_cache)
         a_stats = find_best_stats_match(m['away'], ahl_stats_cache)
         if h_stats and a_stats:
             win_diff = h_stats["win_pct"] - a_stats["win_pct"]
             gf_diff = (h_stats["gf_g"] - a_stats["gf_g"]) / 5.0
             ga_diff = (a_stats["ga_g"] - h_stats["ga_g"]) / 5.0
-            stat_delta = (win_diff * 0.04) + (gf_diff * 0.02) + (ga_diff * 0.02)
+            # Silne tłumienie dla AHL zapobiegające anomaliom początku sezonu
+            raw_delta = (win_diff * 0.015) + (gf_diff * 0.008) + (ga_diff * 0.008)
+            stat_delta = np.clip(raw_delta, -0.03, 0.03)
             
-    # 3. OSTATECZNE PRAWDOPODOBIEŃSTWO AI
+    # 3. OSTATECZNE PRAWDOPODOBIEŃSTWO AI ZESTABILIZOWANE Z RYNKIEM
     ai_prob_home = np.clip(implied_h + stat_delta, 0.15, 0.85)
     ai_prob_away = 1.0 - ai_prob_home
     
@@ -415,7 +412,7 @@ tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value", "📁 Rejestr, ROI & Heatmapa
 
 with tab1:
     st.subheader(f"Terminal Analityczny: {discipline}")
-    st.caption("Źródło: Oficjalne API (NBA / NHL / AHL HockeyTech) + Fuzzy Team Matching")
+    st.caption("Źródło: Oficjalne API (NBA / NHL / AHL HockeyTech) + Stabilized Market Anchoring")
     
     if not analyzed_matches:
         st.warning("Brak nadchodzących spotkań w najbliższych 72h spełniających kryteria rynkowe.")
