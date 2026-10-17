@@ -8,7 +8,6 @@ from datetime import datetime, timezone, timedelta
 import altair as alt
 import io
 import os
-import hashlib
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(
@@ -70,6 +69,29 @@ def init_db():
 
 db_conn = init_db()
 
+# --- MODUŁ POBIERANIA STATYSTYK NBA (nba_api) ---
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_nba_advanced_stats():
+    try:
+        from nba_api.stats.endpoints import leaguestandings
+        standings = leaguestandings.LeagueStandings().get_data_frames()[0]
+        # Tworzymy słownik mapujący nazwę drużyny na jej wskaźniki (np. bilans, wygrane domowe/wyjazdowe)
+        stats_dict = {}
+        for _, row in standings.iterrows():
+            team_name = f"{row['TeamCity']} {row['TeamName']}"
+            win_pct = float(row['WinPCT'])
+            home_record = row['HomeRecord']
+            away_record = row['RoadRecord']
+            stats_dict[team_name] = {
+                "win_pct": win_pct,
+                "home_advantage": 0.05 if "-" in home_record else 0.02
+            }
+        return stats_dict
+    except Exception:
+        return {}
+
+nba_stats_cache = fetch_nba_advanced_stats()
+
 # --- ADAPTIVE TEMPORAL WEIGHTING ENGINE ---
 def get_adaptive_weights(discipline_name):
     current_month = datetime.now().month
@@ -127,6 +149,7 @@ def fetch_the_odds_data(discipline_key):
                                 elif outcome.get('name') == away:
                                     odds_away = float(outcome.get('price', 1.90))
                 
+                # Czyste prawdopodobieństwo rynkowe No-Vig
                 prob_raw_home = 1.0 / odds_home if odds_home > 0 else 0.5
                 prob_raw_away = 1.0 / odds_away if odds_away > 0 else 0.5
                 total_vig = prob_raw_home + prob_raw_away
@@ -216,35 +239,37 @@ analyzed_matches = []
 for m in raw_matches:
     match_id = m['id']
     match_name = f"{m['home']} vs {m['away']}"
-    
-    # Generowanie unikalnej wariancji cech dla każdego meczu na podstawie stabilnego hasha
-    hash_seed = int(hashlib.md5(match_id.encode()).hexdigest(), 16) % 10000 / 10000.0
-    hash_seed_2 = int(hashlib.md5(match_name.encode()).hexdigest(), 16) % 10000 / 10000.0
-    
     implied_home = m['implied_home']
     
-    form_diff_val = (implied_home - 0.5) + (hash_seed - 0.5) * 0.15
-    elo_diff_val = (implied_home - 0.5) * 40 + (hash_seed_2 - 0.5) * 25
+    # Pobieranie realnych statystyk dla NBA jeśli dostępne w cache, w przeciwieństwie opieramy się na rynkowym No-Vig
+    home_win_pct = nba_stats_cache.get(m['home'], {}).get("win_pct", implied_home)
+    away_win_pct = nba_stats_cache.get(m['away'], {}).get("win_pct", 1.0 - implied_home)
+    stat_diff = home_win_pct - away_win_pct
+    
+    form_diff_val = (implied_home - 0.5) + stat_diff * 0.3
+    elo_diff_val = (implied_home - 0.5) * 40 + stat_diff * 20
     
     features = pd.DataFrame([[
         form_diff_val, 
-        0.05, 
-        (hash_seed - 0.5) * 0.1,
-        form_diff_val * 0.4,
-        -form_diff_val * 0.4,
+        0.04, 
+        0.0,
+        form_diff_val * 0.3,
+        -form_diff_val * 0.3,
         elo_diff_val,
         implied_home
     ]], columns=['form_diff', 'home_away_adv', 'fatigue_diff', 'off_diff', 'def_diff', 'elo_diff', 'h2h'])
     
     ai_prob_home = float(model.predict_proba(features)[0][1])
-    ai_prob_home = np.clip(ai_prob_home, 0.30, 0.70)
+    # Stabilna kalibracja oparta w 80% na czystym rynku No-Vig i w 20% na modelu statystycznym
+    ai_prob_home = 0.80 * implied_home + 0.20 * ai_prob_home
+    ai_prob_home = np.clip(ai_prob_home, 0.20, 0.80)
     ai_prob_away = 1.0 - ai_prob_home
     
     odds_home = m['odds_home']
     odds_away = m['odds_away']
     
-    edge_home = (ai_prob_home * odds_home) - 1
-    edge_away = (ai_prob_away * odds_away) - 1
+    edge_home = (ai_prob_home * odds_home) - 1.0
+    edge_away = (ai_prob_away * odds_away) - 1.0
     
     if edge_home >= edge_away:
         best_pick = m['home']
@@ -257,9 +282,9 @@ for m in raw_matches:
         best_odds = odds_away
         best_edge = edge_away
     
-    b = best_odds - 1
+    b = best_odds - 1.0
     p = best_prob
-    q = 1 - p
+    q = 1.0 - p
     kelly_f = (b * p - q) / b if b > 0 else 0
     stake = max(0, bankroll * kelly_f * kelly_fraction) if best_edge > min_edge_slider else 0
     
@@ -290,10 +315,10 @@ tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value", "📁 Rejestr, ROI & Heatmapa
 
 with tab1:
     st.subheader(f"Terminal Analityczny: {discipline}")
-    st.caption(f"Źródło kursów: The Odds API v4 (Filtrowane do 72h)")
+    st.caption(f"Źródło: The Odds API v4 + Oficjalne Statystyki & No-Vig Engine")
     
     if not analyzed_matches:
-        st.warning("Brak nadchodzących spotkań w najbliższych 72h spełniających kryteria przewagi rynkowej.")
+        st.warning("Brak nadchodzących spotkań w najbliższych 72h spełniających kryteria rynkowe.")
     else:
         for m in analyzed_matches:
             edge_pct = round(m['edge'] * 100, 1)
@@ -384,4 +409,4 @@ with tab3:
             x='date:T', y='cumulative_profit:Q', tooltip=['date', 'cumulative_profit']
         ).properties(height=350)
         st.altair_chart(chart, use_container_width=True)
-        
+            
