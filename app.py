@@ -264,32 +264,35 @@ for m in raw_matches:
     match_name = f"{m['home']} vs {m['away']}"
     odds_home, odds_away = m['odds_home'], m['odds_away']
     
-    # 1. Czyste No-Vig jako silna baza rynkowa
+    # Czyste No-Vig jako silna baza rynkowa
     prob_raw_h = 1.0 / odds_home if odds_home > 0 else 0.5
     prob_raw_a = 1.0 / odds_away if odds_away > 0 else 0.5
     tot_v = prob_raw_h + prob_raw_a
     implied_h = prob_raw_h / tot_v if tot_v > 0 else 0.5
     
-    # 2. Bardzo konserwatywna delta (maksymalnie rzędu ±1.5% szans)
+    # Naturalna, płynna delta oparta o różnicę statystyk bez sztucznych ograniczeń liczbowych
     stat_delta = 0.0
     if "NBA" in discipline:
         h_s = find_best_stats_match(m['home'], nba_stats_cache)
         a_s = find_best_stats_match(m['away'], nba_stats_cache)
-        if h_s and a_s: stat_delta = np.clip((h_s["win_pct"] - a_s["win_pct"]) * 0.015, -0.015, 0.015)
+        if h_s and a_s: 
+            stat_delta = (h_s["win_pct"] - a_s["win_pct"]) * 0.03
     elif "NHL" in discipline:
         h_s = find_best_stats_match(m['home'], nhl_stats_cache)
         a_s = find_best_stats_match(m['away'], nhl_stats_cache)
         if h_s and a_s:
             wd = h_s["win_pct"] - a_s["win_pct"]
-            stat_delta = np.clip(wd * 0.01, -0.01, 0.01)
-    else: # AHL - Maksymalnie ścisłe tłumienie (brak sztucznych pompowani)
+            gf_d = (h_s["gf_g"] - a_s["gf_g"]) / 10.0
+            stat_delta = (wd * 0.02) + (gf_d * 0.01)
+    else: # AHL - Organiczne, płynne wyliczenie na bazie oficjalnych statystyk HockeyTech
         h_s = find_best_stats_match(m['home'], ahl_stats_cache)
         a_s = find_best_stats_match(m['away'], ahl_stats_cache)
         if h_s and a_s:
             wd = h_s["win_pct"] - a_s["win_pct"]
-            stat_delta = np.clip(wd * 0.005, -0.008, 0.008)
+            gf_d = (h_s["gf_g"] - a_s["gf_g"]) / 10.0
+            stat_delta = (wd * 0.015) + (gf_d * 0.008)
             
-    ai_prob_home = np.clip(implied_h + stat_delta, 0.15, 0.85)
+    ai_prob_home = np.clip(implied_h + stat_delta, 0.10, 0.90)
     ai_prob_away = 1.0 - ai_prob_home
     
     edge_home = (ai_prob_home * odds_home) - 1.0
@@ -299,9 +302,6 @@ for m in raw_matches:
         best_pick, best_prob, best_odds, best_edge = m['home'], ai_prob_home, odds_home, edge_home
     else:
         best_pick, best_prob, best_odds, best_edge = m['away'], ai_prob_away, odds_away, edge_away
-    
-    # TWARDY CEILING (HARD CAP): Żadne Value w hokeju nie może przekraczać 6.5%
-    best_edge = min(best_edge, 0.065)
     
     b = best_odds - 1.0
     kelly_f = (b * best_prob - (1.0 - best_prob)) / b if b > 0 else 0
@@ -328,7 +328,7 @@ tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value", "📁 Rejestr, ROI & Heatmapa
 
 with tab1:
     st.subheader(f"Terminal Analityczny: {discipline}")
-    st.caption("Źródło: Oficjalne API + Strict Market Anchoring & Hard Cap 6.5%")
+    st.caption("Źródło: Oficjalne API + Naturalny Model No-Vig & Stats Calibration")
     
     if not analyzed_matches:
         st.warning("Brak nadchodzących spotkań spełniających kryteria rynkowe.")
@@ -362,4 +362,4 @@ with tab3:
         df_bets['cumulative_profit'] = df_bets['profit'].cumsum() + bankroll
         chart = alt.Chart(df_bets).mark_line(strokeWidth=3, color='#34d399').encode(x='date:T', y='cumulative_profit:Q').properties(height=350)
         st.altair_chart(chart, use_container_width=True)
-    
+                
