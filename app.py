@@ -21,6 +21,7 @@ st.markdown("""
     [data-testid="stSidebar"] { background-color: #111827; border-right: 1px solid #1f2937; }
     .stMetric { background: linear-gradient(135deg, #1f2937 0%, #111827 100%); padding: 15px; border-radius: 14px; border: 1px solid #374151; }
     .value-card { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border-left: 6px solid #10b981; padding: 20px; border-radius: 12px; margin-bottom: 15px; border: 1px solid #334155; }
+    .handicap-card { background: linear-gradient(135deg, #1e1b4b 0%, #0f172a 100%); border-left: 6px solid #818cf8; padding: 20px; border-radius: 12px; margin-bottom: 15px; border: 1px solid #312e81; }
     .test-box { background: #111827; border: 1px solid #374151; padding: 15px; border-radius: 10px; margin-bottom: 10px; font-family: monospace; font-size: 13px; }
     </style>
 """, unsafe_allow_html=True)
@@ -48,7 +49,8 @@ def init_db():
             profit REAL,
             home_team TEXT,
             away_team TEXT,
-            best_pick TEXT
+            best_pick TEXT,
+            bet_type TEXT DEFAULT 'H2H'
         )
     ''')
     
@@ -139,19 +141,14 @@ def auto_settle_from_api():
                         scores = match.get("scores", [])
                         
                         if scores and len(scores) >= 2:
-                            team1, score1 = scores[0].get("name"), int(scores[0].get("score", 0))
-                            team2, score2 = scores[1].get("name"), int(scores[1].get("score", 0))
-                            
-                            if score1 > score2:
-                                winner = team1
-                            elif score2 > score1:
-                                winner = team2
-                            else:
-                                continue
+                            s1 = int(scores[0].get("score", 0))
+                            s2 = int(scores[1].get("score", 0))
+                            t1, t2 = scores[0].get("name"), scores[1].get("name")
                             
                             for bet in pending_bets:
                                 bet_id, b_sport, odds, stake, best_pick, home, away = bet
-                                if bet_id == match_id and b_sport == sport_name:
+                                if bet_id.split("_")[0] == match_id and b_sport == sport_name:
+                                    winner = t1 if s1 > s2 else t2
                                     won = (best_pick.lower() in winner.lower() or winner.lower() in best_pick.lower())
                                     
                                     if won:
@@ -267,7 +264,7 @@ with st.sidebar:
     total_tracked = cursor.fetchone()[0]
     st.metric("Monitorowane zakłady", total_tracked)
 
-# --- POBIERANIE KURSÓW Z THE ODDS API ---
+# --- POBIERANIE KURSÓW I HANDICAPÓW Z THE ODDS API ---
 if "NBA" in discipline:
     key = "basketball_nba"
 elif "NHL" in discipline:
@@ -276,9 +273,9 @@ else:
     key = "americanfootball_nfl"
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def fetch_odds(d_key):
+def fetch_odds_and_spreads(d_key):
     url = f"{ODDS_BASE_URL}/{d_key}/odds"
-    params = {"apiKey": ODDS_API_KEY, "regions": "us,eu", "markets": "h2h", "oddsFormat": "decimal"}
+    params = {"apiKey": ODDS_API_KEY, "regions": "us,eu", "markets": "h2h,spreads", "oddsFormat": "decimal"}
     all_m = []
     now_utc = datetime.now(timezone.utc)
     max_h = now_utc + timedelta(hours=72)
@@ -295,6 +292,8 @@ def fetch_odds(d_key):
                 match_id = match.get('id')
                 home, away = match.get('home_team'), match.get('away_team')
                 oh, oa = 1.90, 1.90
+                sh_line, sa_line, sh_odds, sa_odds = 0.0, 0.0, 1.90, 1.90
+                
                 books = match.get('bookmakers', [])
                 if books:
                     for mkt in books[0].get('markets', []):
@@ -302,12 +301,27 @@ def fetch_odds(d_key):
                             for out in mkt.get('outcomes', []):
                                 if out.get('name') == home: oh = float(out.get('price', 1.90))
                                 elif out.get('name') == away: oa = float(out.get('price', 1.90))
-                all_m.append({"id": str(match_id), "home": home, "away": away, "commence_time": commence, "odds_home": oh, "odds_away": oa})
+                        elif mkt.get('key') == 'spreads':
+                            for out in mkt.get('outcomes', []):
+                                if out.get('name') == home:
+                                    sh_line = float(out.get('point', 0.0))
+                                    sh_odds = float(out.get('price', 1.90))
+                                elif out.get('name') == away:
+                                    sa_line = float(out.get('point', 0.0))
+                                    sa_odds = float(out.get('price', 1.90))
+                                    
+                all_m.append({
+                    "id": str(match_id), "home": home, "away": away, "commence_time": commence,
+                    "odds_home": oh, "odds_away": oa,
+                    "spread_home_line": sh_line, "spread_home_odds": sh_odds,
+                    "spread_away_line": sa_line, "spread_away_odds": sa_odds
+                })
     except: pass
     return all_m
 
-raw_matches = fetch_odds(key)
-analyzed_matches = []
+raw_matches = fetch_odds_and_spreads(key)
+analyzed_h2h = []
+analyzed_handicaps = []
 cursor = db_conn.cursor()
 
 for m in raw_matches:
@@ -315,6 +329,7 @@ for m in raw_matches:
     match_name = f"{m['home']} vs {m['away']}"
     odds_home, odds_away = m['odds_home'], m['odds_away']
     
+    # --- 1. MODEL H2H ---
     prob_raw_h = 1.0 / odds_home if odds_home > 0 else 0.5
     prob_raw_a = 1.0 / odds_away if odds_away > 0 else 0.5
     tot_v = prob_raw_h + prob_raw_a
@@ -323,12 +338,14 @@ for m in raw_matches:
     
     w = curr_weights
     stat_delta = 0.0
+    expected_margin = 0.0 # Oczekiwana różnica punktów dla faworyta
     
     if "NBA" in discipline:
         h_s, a_s = nba_stats_cache.get(m['home']), nba_stats_cache.get(m['away'])
         if h_s and a_s:
             wd = h_s["win_pct"] - a_s["win_pct"]
             stat_delta = wd * (w["win_pct"] * 0.08 + w["advanced"] * 0.05)
+            expected_margin = wd * 12.0 + (w["home"] * 3.5)
             
     elif "NHL" in discipline:
         h_s, a_s = nhl_stats_cache.get(m['home']), nhl_stats_cache.get(m['away'])
@@ -336,13 +353,15 @@ for m in raw_matches:
             wd = h_s["win_pct"] - a_s["win_pct"]
             gf_diff = (h_s["gf_g"] - a_s["gf_g"]) / 5.0
             stat_delta = (wd * w["win_pct"] * 0.08) + (gf_diff * w["advanced"] * 0.08)
+            expected_margin = (h_s["gf_g"] - a_s["ga_g"]) - (a_s["gf_g"] - h_s["ga_g"])
             
-    else:
+    else: # NFL
         h_s, a_s = nfl_stats_cache.get(m['home']), nfl_stats_cache.get(m['away'])
         if h_s and a_s:
             wd = h_s["win_pct"] - a_s["win_pct"]
             pd_diff = (h_s["point_diff"] - a_s["point_diff"]) / 50.0
             stat_delta = (wd * w["win_pct"] * 0.08) + (pd_diff * w["advanced"] * 0.08)
+            expected_margin = (pd_diff * 7.0) + (w["home"] * 2.5)
         
     ai_prob_home = np.clip(implied_h + stat_delta, 0.05, 0.95)
     ai_prob_away = 1.0 - ai_prob_home
@@ -363,7 +382,7 @@ for m in raw_matches:
         cursor.execute("SELECT id FROM bets WHERE id = ?", (match_id,))
         if not cursor.fetchone():
             cursor.execute(
-                "INSERT INTO bets VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Oczekujący', 0.0, ?, ?, ?)",
+                "INSERT INTO bets VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Oczekujący', 0.0, ?, ?, ?, 'H2H')",
                 (match_id, datetime.now().strftime("%Y-%m-%d"), discipline, match_name, best_odds, best_prob, best_edge, stake, m['home'], m['away'], best_pick)
             )
             db_conn.commit()
@@ -378,34 +397,87 @@ for m in raw_matches:
             "implied_h": round(implied_h * 100, 2),
             "no_vig_sum": round(no_vig_sum, 4)
         })
-        analyzed_matches.append(m_copy)
+        analyzed_h2h.append(m_copy)
 
-analyzed_matches.sort(key=lambda x: x['edge'], reverse=True)
+    # --- 2. DEDYKOWANY MODEL HANDICAPÓW (SPREADS) ---
+    sh_line, sa_line = m['spread_home_line'], m['spread_away_line']
+    sh_odds, sa_odds = m['spread_home_odds'], m['spread_away_odds']
+    
+    if sh_odds > 0 and sa_odds > 0 and sh_line != 0.0:
+        # Szacowanie prawdopodobieństwa pokrycia linii handicapu
+        diff_home_spread = expected_margin + sh_line
+        
+        # Przeliczenie marginesu na P(cover)
+        if "NBA" in discipline:
+            prob_hc_home = np.clip(0.50 + (diff_home_spread * 0.035), 0.10, 0.90)
+        elif "NHL" in discipline: # Puck line 1.5
+            prob_hc_home = np.clip(0.50 + (diff_home_spread * 0.12), 0.10, 0.90)
+        else: # NFL
+            prob_hc_home = np.clip(0.50 + (diff_home_spread * 0.045), 0.10, 0.90)
+            
+        prob_hc_away = 1.0 - prob_hc_home
+        
+        edge_hc_home = (prob_hc_home * sh_odds) - 1.0
+        edge_hc_away = (prob_hc_away * sa_odds) - 1.0
+        
+        if edge_hc_home >= edge_hc_away:
+            hc_pick = f"{m['home']} ({sh_line:+} pkt)"
+            hc_prob, hc_odds, hc_edge = prob_hc_home, sh_odds, edge_hc_home
+        else:
+            hc_pick = f"{m['away']} ({sa_line:+} pkt)"
+            hc_prob, hc_odds, hc_edge = prob_hc_away, sa_odds, edge_hc_away
+            
+        b_hc = hc_odds - 1.0
+        kelly_hc = (b_hc * hc_prob - (1.0 - hc_prob)) / b_hc if b_hc > 0 else 0
+        stake_hc = max(0, bankroll * kelly_hc * kelly_fraction)
+        
+        if hc_edge >= min_edge_slider and stake_hc > 0:
+            hc_bet_id = f"{match_id}_hc"
+            cursor.execute("SELECT id FROM bets WHERE id = ?", (hc_bet_id,))
+            if not cursor.fetchone():
+                cursor.execute(
+                    "INSERT INTO bets VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Oczekujący', 0.0, ?, ?, ?, 'HANDICAP')",
+                    (hc_bet_id, datetime.now().strftime("%Y-%m-%d"), discipline, f"{match_name} [HANDICAP]", hc_odds, hc_prob, hc_edge, stake_hc, m['home'], m['away'], hc_pick)
+                )
+                db_conn.commit()
+
+            m_hc = m.copy()
+            m_hc.update({
+                "best_pick": hc_pick,
+                "ai_prob": hc_prob,
+                "odds": hc_odds,
+                "edge": hc_edge,
+                "stake": round(stake_hc, 2)
+            })
+            analyzed_handicaps.append(m_hc)
+
+analyzed_h2h.sort(key=lambda x: x['edge'], reverse=True)
+analyzed_handicaps.sort(key=lambda x: x['edge'], reverse=True)
 
 # --- INTERFEJS GŁÓWNY ---
 st.markdown("## ⚡ Dashboard Kwantowy")
-tab1, tab2, tab3, tab4 = st.tabs(["🔥 Sygnały Value", "🛡️ Terminal Diagnostyczny", "📁 Rejestr & Rozliczenia", "📈 Krzywa Kapitału"])
+tab1, tab_hc, tab2, tab3, tab4 = st.tabs(["🔥 Sygnały Value (H2H)", "🎯 Analiza Handicapów", "🛡️ Terminal Diagnostyczny", "📁 Rejestr & Rozliczenia", "📈 Krzywa Kapitału"])
 
 with tab1:
-    st.subheader(f"Terminal Analityczny: {discipline}")
-    st.caption("Czysty model No-Vig z adaptacyjnymi wagami uczenia")
+    st.subheader(f"Terminal Analityczny H2H: {discipline}")
+    st.caption("Czysty model No-Vig dla zwycięzcy meczu")
     
-    if not analyzed_matches:
-        st.warning("Brak nadchodzących spotkań spełniających kryteria dodatniego Value w oknie 72h.")
+    if not analyzed_handicaps:
+        st.info("Brak zyskownych linii handicapowych spełniających minimalne kryterium Edge w tym oknie czasowym.")
     else:
-        for m in analyzed_matches:
+        for m in analyzed_handicaps:
             edge_pct = round(m['edge'] * 100, 1)
             prob_pct = round(m['ai_prob'] * 100, 1)
             with st.container():
                 st.markdown(f"""
-                    <div class="value-card">
+                    <div class="handicap-card">
                         <h3>{m['home']} vs {m['away']}</h3>
-                        <p style="color: #94a3b8; font-size: 12px;">Start: {m.get('commence_time', 'Najbliższe godziny')}</p>
-                        <p>🎯 <b>Typ AI:</b> <span style="color: #60a5fa;">{m['best_pick']}</span> (Kurs: {m['odds']})</p>
-                        <p>🔥 <b>Value:</b> <span style="color: #34d399;">+{edge_pct}%</span> | 💰 <b>Stawka:</b> {m['stake']} PLN</p>
+                        <p style="color: #a5b4fc; font-size: 12px;">Start: {m.get('commence_time', 'Najbliższe godziny')}</p>
+                        <p>🎯 <b>Rekomendowany Handicap:</b> <span style="color: #a855f7;">{m['best_pick']}</span> (Kurs: {m['odds']})</p>
+                        <p>🔥 <b>Value Spreadu:</b> <span style="color: #34d399;">+{edge_pct}%</span> | 💰 <b>Stawka Kellego:</b> {m['stake']} PLN</p>
                     </div>
                 """, unsafe_allow_html=True)
-                st.progress(m['ai_prob'], text=f"Rozkład szans AI: {prob_pct}% (No-Vig bazowy: {m['implied_h']}%)")
+                st.progress(m['ai_prob'], text=f"Prawdopodobieństwo pokrycia linii AI: {prob_pct}%")
                 st.divider()
 
 with tab2:
@@ -415,13 +487,13 @@ with tab2:
     test_api_status = "✅ OK (Połączenie stabilne)" if raw_matches else "❌ Brak danych w oknie 72h"
     st.markdown(f"""
         <div class="test-box">
-        <b>[TEST 1] Zewnętrzne API Kursów (The Odds API):</b><br>
+        <b>[TEST 1] Zewnętrzne API Kursów i Spreads (The Odds API):</b><br>
         Status: {test_api_status}<br>
-        Pobrano surowych meczów dla {discipline}: <b>{len(raw_matches)}</b>
+        Pobrano surowych meczów z liniami handicapowymi dla {discipline}: <b>{len(raw_matches)}</b>
         </div>
     """, unsafe_allow_html=True)
     
-    sample_check = analyzed_matches[0] if analyzed_matches else None
+    sample_check = analyzed_h2h[0] if analyzed_h2h else None
     if sample_check:
         st.markdown(f"""
             <div class="test-box">
