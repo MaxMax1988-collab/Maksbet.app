@@ -315,14 +315,12 @@ for m in raw_matches:
     match_name = f"{m['home']} vs {m['away']}"
     odds_home, odds_away = m['odds_home'], m['odds_away']
     
-    # 1. Matematyczne czyszczenie No-Vig
     prob_raw_h = 1.0 / odds_home if odds_home > 0 else 0.5
     prob_raw_a = 1.0 / odds_away if odds_away > 0 else 0.5
     tot_v = prob_raw_h + prob_raw_a
     implied_h = prob_raw_h / tot_v if tot_v > 0 else 0.5
     no_vig_sum = implied_h + (1.0 - implied_h)
     
-    # 2. Dynamiczna korekta statystyczna
     w = curr_weights
     stat_delta = 0.0
     
@@ -339,7 +337,7 @@ for m in raw_matches:
             gf_diff = (h_s["gf_g"] - a_s["gf_g"]) / 5.0
             stat_delta = (wd * w["win_pct"] * 0.08) + (gf_diff * w["advanced"] * 0.08)
             
-    else: # NFL
+    else:
         h_s, a_s = nfl_stats_cache.get(m['home']), nfl_stats_cache.get(m['away'])
         if h_s and a_s:
             wd = h_s["win_pct"] - a_s["win_pct"]
@@ -361,7 +359,6 @@ for m in raw_matches:
     kelly_f = (b * best_prob - (1.0 - best_prob)) / b if b > 0 else 0
     stake = max(0, bankroll * kelly_f * kelly_fraction)
     
-    # --- FILTR VALUE ---
     if best_edge >= min_edge_slider and stake > 0:
         cursor.execute("SELECT id FROM bets WHERE id = ?", (match_id,))
         if not cursor.fetchone():
@@ -455,6 +452,15 @@ with tab2:
         </div>
     """, unsafe_allow_html=True)
 
+    st.markdown("---")
+    st.markdown("### ⚠️ Strefa Zarządzania Bazą")
+    if st.button("🗑️ Resetuj / Wyczyść całą bazę danych"):
+        cursor.execute("DROP TABLE IF EXISTS bets")
+        cursor.execute("DROP TABLE IF EXISTS weights_history")
+        db_conn.commit()
+        st.success("Baza danych została w pełni zresetowana! Odśwież stronę (F5), aby zacząć od nowa.")
+        st.rerun()
+
 with tab3:
     st.subheader("📁 Rejestr Zakładów & Rozliczanie (Feedback Loop)")
     df_bets = pd.read_sql("SELECT * FROM bets", db_conn)
@@ -496,4 +502,3 @@ with tab4:
         df_bets['cumulative_profit'] = df_bets['profit'].cumsum() + bankroll
         chart = alt.Chart(df_bets).mark_line(strokeWidth=3, color='#34d399').encode(x='date:T', y='cumulative_profit:Q').properties(height=350)
         st.altair_chart(chart, use_container_width=True)
-   
