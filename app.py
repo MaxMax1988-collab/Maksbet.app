@@ -111,6 +111,64 @@ def update_weights_after_settlement(sport_name, bet_won):
     ''', (nw_win, nw_adv, nw_form, nw_home, sport_name))
     db_conn.commit()
 
+# --- AUTOMATYCZNE ROZLICZANIE ZAKŁADÓW Z API (SCORES) ---
+def auto_settle_from_api():
+    cursor = db_conn.cursor()
+    cursor.execute("SELECT id, sport, odds, stake, best_pick, home_team, away_team FROM bets WHERE status = 'Oczekujący'")
+    pending_bets = cursor.fetchall()
+    
+    if not pending_bets:
+        return
+
+    sport_keys = {
+        "🏀 NBA Koszykówka": "basketball_nba",
+        "🏒 NHL Hokej": "icehockey_nhl",
+        "🏈 NFL Futbol Amerykański": "americanfootball_nfl"
+    }
+
+    for sport_name, d_key in sport_keys.items():
+        url = f"{ODDS_BASE_URL}/{d_key}/scores"
+        params = {"apiKey": ODDS_API_KEY, "daysFrom": 3}
+        try:
+            res = requests.get(url, params=params, timeout=10)
+            if res.status_code == 200:
+                completed_matches = res.json()
+                for match in completed_matches:
+                    if match.get("completed", False):
+                        match_id = str(match.get("id"))
+                        scores = match.get("scores", [])
+                        
+                        if scores and len(scores) >= 2:
+                            team1, score1 = scores[0].get("name"), int(scores[0].get("score", 0))
+                            team2, score2 = scores[1].get("name"), int(scores[1].get("score", 0))
+                            
+                            if score1 > score2:
+                                winner = team1
+                            elif score2 > score1:
+                                winner = team2
+                            else:
+                                continue
+                            
+                            for bet in pending_bets:
+                                bet_id, b_sport, odds, stake, best_pick, home, away = bet
+                                if bet_id == match_id and b_sport == sport_name:
+                                    won = (best_pick.lower() in winner.lower() or winner.lower() in best_pick.lower())
+                                    
+                                    if won:
+                                        status = 'Wygrany'
+                                        profit = round((odds - 1.0) * stake, 2)
+                                    else:
+                                        status = 'Przegrany'
+                                        profit = round(-stake, 2)
+                                        
+                                    cursor.execute("UPDATE bets SET status = ?, profit = ? WHERE id = ?", (status, profit, bet_id))
+                                    db_conn.commit()
+                                    update_weights_after_settlement(sport_name, won)
+        except Exception:
+            pass
+
+auto_settle_from_api()
+
 # --- POBIERANIE STATYSTYK Z OFICJALNYCH API ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_nhl_stats():
@@ -250,6 +308,7 @@ def fetch_odds(d_key):
 
 raw_matches = fetch_odds(key)
 analyzed_matches = []
+cursor = db_conn.cursor()
 
 for m in raw_matches:
     match_id = m['id']
@@ -263,7 +322,7 @@ for m in raw_matches:
     implied_h = prob_raw_h / tot_v if tot_v > 0 else 0.5
     no_vig_sum = implied_h + (1.0 - implied_h)
     
-    # 2. Dynamiczna korekta statystyczna z odpowiednią czułością dla każdej dyscypliny
+    # 2. Dynamiczna korekta statystyczna
     w = curr_weights
     stat_delta = 0.0
     
@@ -302,7 +361,7 @@ for m in raw_matches:
     kelly_f = (b * best_prob - (1.0 - best_prob)) / b if b > 0 else 0
     stake = max(0, bankroll * kelly_f * kelly_fraction)
     
-    # --- ŻELAZNY FILTR VALUE ---
+    # --- FILTR VALUE ---
     if best_edge >= min_edge_slider and stake > 0:
         cursor.execute("SELECT id FROM bets WHERE id = ?", (match_id,))
         if not cursor.fetchone():
@@ -405,10 +464,10 @@ with tab3:
         st.dataframe(df_bets, use_container_width=True)
         
         st.markdown("---")
-        st.markdown("### ⚖️ Rozlicz zakład i wyucz model")
+        st.markdown("### ⚖️ Ręczna korekta / rozliczenie")
         pending_bets = df_bets[df_bets['status'] == 'Oczekujący']
         if not pending_bets.empty:
-            selected_bet_id = st.selectbox("Wybierz mecz do rozliczenia", pending_bets['id'].tolist(), format_func=lambda x: pending_bets[pending_bets['id']==x]['match_name'].values[0])
+            selected_bet_id = st.selectbox("Wybierz mecz do ręcznego rozliczenia", pending_bets['id'].tolist(), format_func=lambda x: pending_bets[pending_bets['id']==x]['match_name'].values[0])
             bet_row = pending_bets[pending_bets['id'] == selected_bet_id].iloc[0]
             
             col_a, col_b = st.columns(2)
@@ -437,4 +496,4 @@ with tab4:
         df_bets['cumulative_profit'] = df_bets['profit'].cumsum() + bankroll
         chart = alt.Chart(df_bets).mark_line(strokeWidth=3, color='#34d399').encode(x='date:T', y='cumulative_profit:Q').properties(height=350)
         st.altair_chart(chart, use_container_width=True)
-            
+   
