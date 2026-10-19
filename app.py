@@ -30,7 +30,7 @@ st.markdown("""
 ODDS_API_KEY = "3e81b37bac9bb7efbe8d2cf68065b6dc"
 ODDS_BASE_URL = "https://api.the-odds-api.com/v4/sports"
 
-# --- BAZA DANYCH SQLITE Z MODUŁEM WAG ---
+# --- BAZA DANYCH SQLITE Z BEZPIECZNĄ MIGRACJĄ ---
 def init_db():
     conn = sqlite3.connect("bets_database.db", check_same_thread=False)
     cursor = conn.cursor()
@@ -53,6 +53,12 @@ def init_db():
             bet_type TEXT DEFAULT 'H2H'
         )
     ''')
+    
+    # Bezpieczne dodanie kolumny jeśli starsza baza jej nie miała
+    try:
+        cursor.execute("ALTER TABLE bets ADD COLUMN bet_type TEXT DEFAULT 'H2H'")
+    except sqlite3.OperationalError:
+        pass
     
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS weights_history (
@@ -338,7 +344,7 @@ for m in raw_matches:
     
     w = curr_weights
     stat_delta = 0.0
-    expected_margin = 0.0 # Oczekiwana różnica punktów dla faworyta
+    expected_margin = 0.0
     
     if "NBA" in discipline:
         h_s, a_s = nba_stats_cache.get(m['home']), nba_stats_cache.get(m['away'])
@@ -353,9 +359,9 @@ for m in raw_matches:
             wd = h_s["win_pct"] - a_s["win_pct"]
             gf_diff = (h_s["gf_g"] - a_s["gf_g"]) / 5.0
             stat_delta = (wd * w["win_pct"] * 0.08) + (gf_diff * w["advanced"] * 0.08)
-            expected_margin = (h_s["gf_g"] - a_s["ga_g"]) - (a_s["gf_g"] - h_s["ga_g"])
+            expected_margin = (h_s["gf_g"] - h_s["ga_g"]) - (a_s["gf_g"] - a_s["ga_g"])
             
-    else: # NFL
+    else:
         h_s, a_s = nfl_stats_cache.get(m['home']), nfl_stats_cache.get(m['away'])
         if h_s and a_s:
             wd = h_s["win_pct"] - a_s["win_pct"]
@@ -404,15 +410,13 @@ for m in raw_matches:
     sh_odds, sa_odds = m['spread_home_odds'], m['spread_away_odds']
     
     if sh_odds > 0 and sa_odds > 0 and sh_line != 0.0:
-        # Szacowanie prawdopodobieństwa pokrycia linii handicapu
         diff_home_spread = expected_margin + sh_line
         
-        # Przeliczenie marginesu na P(cover)
         if "NBA" in discipline:
             prob_hc_home = np.clip(0.50 + (diff_home_spread * 0.035), 0.10, 0.90)
-        elif "NHL" in discipline: # Puck line 1.5
+        elif "NHL" in discipline:
             prob_hc_home = np.clip(0.50 + (diff_home_spread * 0.12), 0.10, 0.90)
-        else: # NFL
+        else:
             prob_hc_home = np.clip(0.50 + (diff_home_spread * 0.045), 0.10, 0.90)
             
         prob_hc_away = 1.0 - prob_hc_home
@@ -461,6 +465,28 @@ tab1, tab_hc, tab2, tab3, tab4 = st.tabs(["🔥 Sygnały Value (H2H)", "🎯 Ana
 with tab1:
     st.subheader(f"Terminal Analityczny H2H: {discipline}")
     st.caption("Czysty model No-Vig dla zwycięzcy meczu")
+    
+    if not analyzed_h2h:
+        st.warning("Brak nadchodzących spotkań H2H spełniających kryteria dodatniego Value w oknie 72h.")
+    else:
+        for m in analyzed_h2h:
+            edge_pct = round(m['edge'] * 100, 1)
+            prob_pct = round(m['ai_prob'] * 100, 1)
+            with st.container():
+                st.markdown(f"""
+                    <div class="value-card">
+                        <h3>{m['home']} vs {m['away']}</h3>
+                        <p style="color: #94a3b8; font-size: 12px;">Start: {m.get('commence_time', 'Najbliższe godziny')}</p>
+                        <p>🎯 <b>Typ AI (H2H):</b> <span style="color: #60a5fa;">{m['best_pick']}</span> (Kurs: {m['odds']})</p>
+                        <p>🔥 <b>Value:</b> <span style="color: #34d399;">+{edge_pct}%</span> | 💰 <b>Stawka Kellego:</b> {m['stake']} PLN</p>
+                    </div>
+                """, unsafe_allow_html=True)
+                st.progress(m['ai_prob'], text=f"Rozkład szans AI: {prob_pct}% (No-Vig bazowy: {m['implied_h']}%)")
+                st.divider()
+
+with tab_hc:
+    st.subheader(f"Dedykowany Moduł Handicapów: {discipline}")
+    st.caption("Ocena przewagi punktowej / bramkowej względem linii bukmacherskich")
     
     if not analyzed_handicaps:
         st.info("Brak zyskownych linii handicapowych spełniających minimalne kryterium Edge w tym oknie czasowym.")
