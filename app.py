@@ -54,7 +54,6 @@ def init_db():
         )
     ''')
     
-    # Bezpieczne dodanie kolumny jeśli starsza baza jej nie miała
     try:
         cursor.execute("ALTER TABLE bets ADD COLUMN bet_type TEXT DEFAULT 'H2H'")
     except sqlite3.OperationalError:
@@ -70,10 +69,11 @@ def init_db():
         )
     ''')
     
+    # Bardziej rozbudowane wagi bazowe dla poszczególnych dyscyplin
     default_weights = {
-        "🏀 NBA Koszykówka": (0.25, 0.35, 0.25, 0.15),
-        "🏒 NHL Hokej": (0.30, 0.35, 0.20, 0.15),
-        "🏈 NFL Futbol Amerykański": (0.35, 0.30, 0.20, 0.15)
+        "🏀 NBA Koszykówka": (0.30, 0.35, 0.20, 0.15),
+        "🏒 NHL Hokej": (0.25, 0.40, 0.20, 0.15),
+        "🏈 NFL Futbol Amerykański": (0.35, 0.35, 0.15, 0.15)
     }
     
     for sport, (w1, w2, w3, w4) in default_weights.items():
@@ -94,7 +94,7 @@ def get_sport_weights(sport_name):
     row = cursor.fetchone()
     if row:
         return {"win_pct": row[0], "advanced": row[1], "form": row[2], "home": row[3]}
-    return {"win_pct": 0.25, "advanced": 0.35, "form": 0.25, "home": 0.15}
+    return {"win_pct": 0.30, "advanced": 0.35, "form": 0.20, "home": 0.15}
 
 # --- MODUŁ UCZENIA SIĘ WAG (FEEDBACK LOOP) ---
 def update_weights_after_settlement(sport_name, bet_won):
@@ -259,9 +259,9 @@ with st.sidebar:
     curr_weights = get_sport_weights(discipline)
     st.markdown("---")
     st.markdown("<b>🧠 Wyuczone Wagi Modelu:</b>", unsafe_allow_html=True)
-    st.caption(f"・ Win % / Bilans: {round(curr_weights['win_pct']*100, 1)}%")
-    st.caption(f"・ Advanced Stats: {round(curr_weights['advanced']*100, 1)}%")
-    st.caption(f"・ Form (L10/L5): {round(curr_weights['form']*100, 1)}%")
+    st.caption(f"・ Bilans / Win %: {round(curr_weights['win_pct']*100, 1)}%")
+    st.caption(f"・ Advanced Stats (API): {round(curr_weights['advanced']*100, 1)}%")
+    st.caption(f"・ Dynamika / Forma: {round(curr_weights['form']*100, 1)}%")
     st.caption(f"・ Home Advantage: {round(curr_weights['home']*100, 1)}%")
     
     st.markdown("---")
@@ -357,16 +357,16 @@ for m in raw_matches:
         h_s, a_s = nhl_stats_cache.get(m['home']), nhl_stats_cache.get(m['away'])
         if h_s and a_s:
             wd = h_s["win_pct"] - a_s["win_pct"]
-            gf_diff = (h_s["gf_g"] - a_s["gf_g"]) / 5.0
-            stat_delta = (wd * w["win_pct"] * 0.08) + (gf_diff * w["advanced"] * 0.08)
-            expected_margin = (h_s["gf_g"] - h_s["ga_g"]) - (a_s["gf_g"] - a_s["ga_g"])
+            gf_diff = (h_s["gf_g"] - a_s["ga_g"]) - (a_s["gf_g"] - h_s["ga_g"])
+            stat_delta = (wd * w["win_pct"] * 0.08) + (gf_diff * w["advanced"] * 0.05)
+            expected_margin = gf_diff + (w["home"] * 0.3)
             
     else:
         h_s, a_s = nfl_stats_cache.get(m['home']), nfl_stats_cache.get(m['away'])
         if h_s and a_s:
             wd = h_s["win_pct"] - a_s["win_pct"]
             pd_diff = (h_s["point_diff"] - a_s["point_diff"]) / 50.0
-            stat_delta = (wd * w["win_pct"] * 0.08) + (pd_diff * w["advanced"] * 0.08)
+            stat_delta = (wd * w["win_pct"] * 0.08) + (pd_diff * w["advanced"] * 0.05)
             expected_margin = (pd_diff * 7.0) + (w["home"] * 2.5)
         
     ai_prob_home = np.clip(implied_h + stat_delta, 0.05, 0.95)
@@ -405,20 +405,16 @@ for m in raw_matches:
         })
         analyzed_h2h.append(m_copy)
 
-    # --- 2. DEDYKOWANY MODEL HANDICAPÓW (SPREADS) ---
+    # --- 2. REALISTYCZNY MODEL HANDICAPÓW (SIGMOID Z DANYMI API) ---
     sh_line, sa_line = m['spread_home_line'], m['spread_away_line']
     sh_odds, sa_odds = m['spread_home_odds'], m['spread_away_odds']
     
     if sh_odds > 0 and sa_odds > 0 and sh_line != 0.0:
         diff_home_spread = expected_margin + sh_line
         
-        if "NBA" in discipline:
-            prob_hc_home = np.clip(0.50 + (diff_home_spread * 0.035), 0.10, 0.90)
-        elif "NHL" in discipline:
-            prob_hc_home = np.clip(0.50 + (diff_home_spread * 0.12), 0.10, 0.90)
-        else:
-            prob_hc_home = np.clip(0.50 + (diff_home_spread * 0.045), 0.10, 0.90)
-            
+        scale_factor = 14.0 if "NBA" in discipline else (4.5 if "NHL" in discipline else 18.0)
+        prob_hc_home = 1.0 / (1.0 + np.exp(-diff_home_spread / scale_factor))
+        prob_hc_home = np.clip(prob_hc_home, 0.25, 0.75)
         prob_hc_away = 1.0 - prob_hc_home
         
         edge_hc_home = (prob_hc_home * sh_odds) - 1.0
@@ -464,7 +460,7 @@ tab1, tab_hc, tab2, tab3, tab4 = st.tabs(["🔥 Sygnały Value (H2H)", "🎯 Ana
 
 with tab1:
     st.subheader(f"Terminal Analityczny H2H: {discipline}")
-    st.caption("Czysty model No-Vig dla zwycięzcy meczu")
+    st.caption("Model No-Vig zasilany statystykami oficjalnych lig")
     
     if not analyzed_h2h:
         st.warning("Brak nadchodzących spotkań H2H spełniających kryteria dodatniego Value w oknie 72h.")
@@ -486,7 +482,7 @@ with tab1:
 
 with tab_hc:
     st.subheader(f"Dedykowany Moduł Handicapów: {discipline}")
-    st.caption("Ocena przewagi punktowej / bramkowej względem linii bukmacherskich")
+    st.caption("Zaawansowany model Sigmoid oparty na live-stats z API")
     
     if not analyzed_handicaps:
         st.info("Brak zyskownych linii handicapowych spełniających minimalne kryterium Edge w tym oknie czasowym.")
@@ -600,3 +596,4 @@ with tab4:
         df_bets['cumulative_profit'] = df_bets['profit'].cumsum() + bankroll
         chart = alt.Chart(df_bets).mark_line(strokeWidth=3, color='#34d399').encode(x='date:T', y='cumulative_profit:Q').properties(height=350)
         st.altair_chart(chart, use_container_width=True)
+    
