@@ -59,6 +59,7 @@ def init_db():
     except sqlite3.OperationalError:
         pass
     
+    # Bezpieczne odświeżenie struktury weights_history bez błędów konfliktu kolumn
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS weights_history (
             sport TEXT PRIMARY KEY,
@@ -596,4 +597,3 @@ with tab4:
         df_bets['cumulative_profit'] = df_bets['profit'].cumsum() + bankroll
         chart = alt.Chart(df_bets).mark_line(strokeWidth=3, color='#34d399').encode(x='date:T', y='cumulative_profit:Q').properties(height=350)
         st.altair_chart(chart, use_container_width=True)
-    
