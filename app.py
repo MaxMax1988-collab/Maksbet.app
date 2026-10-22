@@ -280,22 +280,21 @@ else:
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_odds_and_spreads(d_key):
     url = f"{ODDS_BASE_URL}/{d_key}/odds"
-    params = {"apiKey": ODDS_API_KEY, "regions": "us,eu", "markets": "h2h,spreads", "oddsFormat": "decimal"}
+    params = {"apiKey": ODDS_API_KEY, "regions": "us", "markets": "h2h,spreads", "oddsFormat": "decimal"}
     all_m = []
-    now_utc = datetime.now(timezone.utc)
-    max_h = now_utc + timedelta(hours=72)
+    debug_info = {"status_code": 0, "total_raw": 0, "error": None}
+    
     try:
         res = requests.get(url, params=params, timeout=10)
+        debug_info["status_code"] = res.status_code
         if res.status_code == 200:
-            for match in res.json():
-                commence = match.get('commence_time')
-                if commence:
-                    try:
-                        m_time = datetime.fromisoformat(commence.replace('Z', '+00:00'))
-                        if m_time > max_h: continue
-                    except: pass
+            raw_json = res.json()
+            debug_info["total_raw"] = len(raw_json)
+            for match in raw_json:
                 match_id = match.get('id')
                 home, away = match.get('home_team'), match.get('away_team')
+                commence = match.get('commence_time')
+                
                 oh, oa = 1.90, 1.90
                 sh_line, sa_line, sh_odds, sa_odds = 0.0, 0.0, 1.90, 1.90
                 
@@ -321,13 +320,25 @@ def fetch_odds_and_spreads(d_key):
                     "spread_home_line": sh_line, "spread_home_odds": sh_odds,
                     "spread_away_line": sa_line, "spread_away_odds": sa_odds
                 })
-    except: pass
-    return all_m
+        else:
+            debug_info["error"] = res.text
+    except Exception as e:
+        debug_info["error"] = str(e)
+        
+    return all_m, debug_info
 
-raw_matches = fetch_odds_and_spreads(key)
+raw_matches, api_debug = fetch_odds_and_spreads(key)
 analyzed_h2h = []
 analyzed_handicaps = []
 cursor = db_conn.cursor()
+
+def find_team_stats(team_name, stats_cache):
+    if not stats_cache: return None
+    if team_name in stats_cache: return stats_cache[team_name]
+    for k, v in stats_cache.items():
+        if k.lower() in team_name.lower() or team_name.lower() in k.lower():
+            return v
+    return None
 
 for m in raw_matches:
     match_id = m['id']
@@ -346,14 +357,16 @@ for m in raw_matches:
     expected_margin = 0.0
     
     if "NBA" in discipline:
-        h_s, a_s = nba_stats_cache.get(m['home']), nba_stats_cache.get(m['away'])
+        h_s = find_team_stats(m['home'], nba_stats_cache)
+        a_s = find_team_stats(m['away'], nba_stats_cache)
         if h_s and a_s:
             wd = h_s["win_pct"] - a_s["win_pct"]
             stat_delta = wd * (w["win_pct"] * 0.08 + w["advanced"] * 0.05)
             expected_margin = wd * 12.0 + (w["home"] * 3.5)
             
     elif "NHL" in discipline:
-        h_s, a_s = nhl_stats_cache.get(m['home']), nhl_stats_cache.get(m['away'])
+        h_s = find_team_stats(m['home'], nhl_stats_cache)
+        a_s = find_team_stats(m['away'], nhl_stats_cache)
         if h_s and a_s:
             wd = h_s["win_pct"] - a_s["win_pct"]
             gf_diff = (h_s["gf_g"] - a_s["ga_g"]) - (a_s["gf_g"] - h_s["ga_g"])
@@ -361,7 +374,8 @@ for m in raw_matches:
             expected_margin = gf_diff + (w["home"] * 0.3)
             
     else:
-        h_s, a_s = nfl_stats_cache.get(m['home']), nfl_stats_cache.get(m['away'])
+        h_s = find_team_stats(m['home'], nfl_stats_cache)
+        a_s = find_team_stats(m['away'], nfl_stats_cache)
         if h_s and a_s:
             wd = h_s["win_pct"] - a_s["win_pct"]
             pd_diff = (h_s["point_diff"] - a_s["point_diff"]) / 50.0
@@ -468,7 +482,7 @@ with tab1:
     st.caption("Model No-Vig zasilany statystykami oficjalnych lig")
     
     if not analyzed_h2h:
-        st.warning("Brak nadchodzących spotkań H2H spełniających kryteria dodatniego Value w oknie 72h.")
+        st.warning("Brak nadchodzących spotkań H2H spełniających kryteria dodatniego Value w tym momencie.")
     else:
         for m in analyzed_h2h:
             edge_pct = round(m['edge'] * 100, 1)
@@ -511,12 +525,13 @@ with tab2:
     st.subheader("🛡️ Terminal Diagnostyczny Systemu")
     st.caption("Weryfikacja API, neutralności marży oraz stanu sieci wag")
     
-    test_api_status = "✅ OK (Połączenie stabilne)" if raw_matches else "❌ Brak danych w oknie 72h"
+    status_icon = "✅ OK" if api_debug["status_code"] == 200 and api_debug["total_raw"] > 0 else "❌ Błąd / Brak danych"
     st.markdown(f"""
         <div class="test-box">
         <b>[TEST 1] Zewnętrzne API Kursów i Spreads (The Odds API):</b><br>
-        Status: {test_api_status}<br>
-        Pobrano surowych meczów z liniami handicapowymi dla {discipline}: <b>{len(raw_matches)}</b>
+        Status HTTP: <b>{api_debug['status_code']}</b> ({status_icon})<br>
+        Pobrano surowych meczów z API dla {discipline}: <b>{api_debug['total_raw']}</b><br>
+        Szczegóły / Błędy: <span style="color: #f87171;">{api_debug['error'] if api_debug['error'] else 'Brak błędów'}</span>
         </div>
     """, unsafe_allow_html=True)
     
