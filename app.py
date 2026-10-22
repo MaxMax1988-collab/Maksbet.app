@@ -59,7 +59,6 @@ def init_db():
     except sqlite3.OperationalError:
         pass
     
-    # Bezpieczne odświeżenie struktury weights_history bez błędów konfliktu kolumn
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS weights_history (
             sport TEXT PRIMARY KEY,
@@ -70,7 +69,6 @@ def init_db():
         )
     ''')
     
-    # Bardziej rozbudowane wagi bazowe dla poszczególnych dyscyplin
     default_weights = {
         "🏀 NBA Koszykówka": (0.30, 0.35, 0.20, 0.15),
         "🏒 NHL Hokej": (0.25, 0.40, 0.20, 0.15),
@@ -456,8 +454,8 @@ analyzed_h2h.sort(key=lambda x: x['edge'], reverse=True)
 analyzed_handicaps.sort(key=lambda x: x['edge'], reverse=True)
 
 # --- INTERFEJS GŁÓWNY ---
-st.markdown("## ⚡ Dashboard Kwantowy")
-tab1, tab_hc, tab2, tab3, tab4 = st.tabs(["🔥 Sygnały Value (H2H)", "🎯 Analiza Handicapów", "🛡️ Terminal Diagnostyczny", "📁 Rejestr & Rozliczenia", "📈 Krzywa Kapitału"])
+st.markdown("## ⚡ Dashboard Kwantowy & Performance Live")
+tab1, tab_hc, tab2, tab3, tab4 = st.tabs(["🔥 Sygnały Value (H2H)", "🎯 Analiza Handicapów", "🛡️ Terminal Diagnostyczny", "📁 Rejestr & Rozliczenia", "📈 Zaawansowana Analityka & ROI"])
 
 with tab1:
     st.subheader(f"Terminal Analityczny H2H: {discipline}")
@@ -590,10 +588,63 @@ with tab3:
                     st.rerun()
 
 with tab4:
-    st.subheader("📈 Krzywa Kapitału")
-    df_bets = pd.read_sql("SELECT date, profit FROM bets WHERE status != 'Oczekujący'", db_conn)
-    if df_bets.empty: st.info("Wykres uaktywni się po rozliczeniu pierwszego zakładu.")
+    st.subheader("📈 Zaawansowana Analityka Skuteczności & ROI Live")
+    
+    df_settled = pd.read_sql("SELECT * FROM bets WHERE status != 'Oczekujący'", db_conn)
+    
+    if df_settled.empty:
+        st.info("Brak rozliczonych zakładów. Rozlicz pierwsze zakłady w zakładce 'Rejestr & Rozliczenia', aby wygenerować pełny raport statystyczny.")
     else:
-        df_bets['cumulative_profit'] = df_bets['profit'].cumsum() + bankroll
-        chart = alt.Chart(df_bets).mark_line(strokeWidth=3, color='#34d399').encode(x='date:T', y='cumulative_profit:Q').properties(height=350)
-        st.altair_chart(chart, use_container_width=True)
+        total_settled = len(df_settled)
+        won_bets = len(df_settled[df_settled['status'] == 'Wygrany'])
+        win_rate = (won_bets / total_settled) * 100 if total_settled > 0 else 0
+        total_profit = df_settled['profit'].sum()
+        total_staked = df_settled['stake'].sum()
+        roi = (total_profit / total_staked) * 100 if total_staked > 0 else 0
+        
+        # KPI Metrics Row
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Rozliczone Zakłady", total_settled)
+        col2.metric("Skuteczność (Win Rate)", f"{win_rate:.1f}%")
+        col3.metric("Całkowity Zysk / Strata", f"{total_profit:.2f} PLN", delta=f"{total_profit:.2f} PLN")
+        col4.metric("ROI Modelu", f"{roi:.2f}%", delta=f"{roi:.2f}%")
+        
+        st.markdown("---")
+        st.subheader("📊 Analiza wg Dyscyplin i Typu Zakładów")
+        
+        col_m1, col_m2 = st.columns(2)
+        with col_m1:
+            st.markdown("##### Skuteczność per Sport")
+            sport_perf = df_settled.groupby('sport').agg(
+                Zakłady=('id', 'count'),
+                Zysk=('profit', 'sum')
+            ).reset_index()
+            st.dataframe(sport_perf, use_container_width=True)
+            
+        with col_m2:
+            st.markdown("##### Skuteczność per Typ Zakładu (H2H vs Handicap)")
+            type_perf = df_settled.groupby('bet_type').agg(
+                Zakłady=('id', 'count'),
+                Zysk=('profit', 'sum')
+            ).reset_index()
+            st.dataframe(type_perf, use_container_width=True)
+
+        st.markdown("---")
+        st.subheader("📈 Krzywa Wzrostu Kapitału (Equity Curve)")
+        
+        df_settled['cumulative_profit'] = df_settled['profit'].cumsum()
+        df_settled['Kapitał (PLN)'] = bankroll + df_settled['cumulative_profit']
+        
+        # Czytelny wykres Altair z linią bazową kapitału początkowego
+        base_chart = alt.Chart(df_settled).mark_line(strokeWidth=3, color='#34d399').encode(
+            x=alt.X('date:T', title='Data rozliczenia'),
+            y=alt.Y('Kapitał (PLN):Q', title='Stan Bankrollu (PLN)', scale=alt.Scale(zero=False)),
+            tooltip=['date', 'match_name', 'profit', 'Kapitał (PLN)']
+        )
+        
+        rule = alt.Chart(pd.DataFrame({'y': [bankroll]})).mark_rule(color='red', strokeDash=[4, 4]).encode(y='y:Q')
+        
+        final_chart = (base_chart + rule).properties(height=400)
+        st.altair_chart(final_chart, use_container_width=True)
+        st.caption("ℹ️ Czerwona linia przerywana oznacza poziom kapitału początkowego (bankroll startowy). Wszystko powyżej to czysty zysk modelu.")
+     
