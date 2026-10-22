@@ -27,7 +27,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- CONFIG API ---
-ODDS_API_KEY = "3e81b37bac9bb7efbe8d2cf68065b6dc"
+ODDS_API_KEY = "af7b4349b28ca8ffe8a5f2a0722073e2"
 ODDS_BASE_URL = "https://api.the-odds-api.com/v4/sports"
 
 # --- BAZA DANYCH SQLITE Z BEZPIECZNĄ MIGRACJĄ ---
