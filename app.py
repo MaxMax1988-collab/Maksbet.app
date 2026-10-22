@@ -381,7 +381,7 @@ for m in raw_matches:
     
     b = best_odds - 1.0
     kelly_f = (b * best_prob - (1.0 - best_prob)) / b if b > 0 else 0
-    stake = max(0, bankroll * kelly_f * kelly_fraction)
+    stake = min(bankroll * 0.04, max(0, bankroll * kelly_f * kelly_fraction))
     
     if best_edge >= min_edge_slider and stake > 0:
         cursor.execute("SELECT id FROM bets WHERE id = ?", (match_id,))
@@ -404,16 +404,22 @@ for m in raw_matches:
         })
         analyzed_h2h.append(m_copy)
 
-    # --- 2. REALISTYCZNY MODEL HANDICAPÓW (SIGMOID Z DANYMI API) ---
+    # --- 2. ZABEZPIECZONY MODEL HANDICAPÓW (BAYESIAN ANCHORED) ---
     sh_line, sa_line = m['spread_home_line'], m['spread_away_line']
     sh_odds, sa_odds = m['spread_home_odds'], m['spread_away_odds']
     
     if sh_odds > 0 and sa_odds > 0 and sh_line != 0.0:
-        diff_home_spread = expected_margin + sh_line
+        p_raw_sh = 1.0 / sh_odds
+        p_raw_sa = 1.0 / sa_odds
+        p_tot_s = p_raw_sh + p_raw_sa
+        mkt_hc_home = p_raw_sh / p_tot_s if p_tot_s > 0 else 0.5
         
-        scale_factor = 14.0 if "NBA" in discipline else (4.5 if "NHL" in discipline else 18.0)
-        prob_hc_home = 1.0 / (1.0 + np.exp(-diff_home_spread / scale_factor))
-        prob_hc_home = np.clip(prob_hc_home, 0.25, 0.75)
+        scale_factor = 22.0 if "NBA" in discipline else (6.0 if "NHL" in discipline else 24.0)
+        model_hc_home = 1.0 / (1.0 + np.exp(-expected_margin / scale_factor))
+        
+        # Kotwiczenie Bayesian: 85% Rynek / 15% Model
+        prob_hc_home = (0.85 * mkt_hc_home) + (0.15 * model_hc_home)
+        prob_hc_home = np.clip(prob_hc_home, 0.35, 0.65)
         prob_hc_away = 1.0 - prob_hc_home
         
         edge_hc_home = (prob_hc_home * sh_odds) - 1.0
@@ -428,7 +434,7 @@ for m in raw_matches:
             
         b_hc = hc_odds - 1.0
         kelly_hc = (b_hc * hc_prob - (1.0 - hc_prob)) / b_hc if b_hc > 0 else 0
-        stake_hc = max(0, bankroll * kelly_hc * kelly_fraction)
+        stake_hc = min(bankroll * 0.04, max(0, bankroll * kelly_hc * kelly_fraction))
         
         if hc_edge >= min_edge_slider and stake_hc > 0:
             hc_bet_id = f"{match_id}_hc"
@@ -481,7 +487,7 @@ with tab1:
 
 with tab_hc:
     st.subheader(f"Dedykowany Moduł Handicapów: {discipline}")
-    st.caption("Zaawansowany model Sigmoid oparty na live-stats z API")
+    st.caption("Zaawansowany model Sigmoid z kotwiczeniem rynkowym")
     
     if not analyzed_handicaps:
         st.info("Brak zyskownych linii handicapowych spełniających minimalne kryterium Edge w tym oknie czasowym.")
@@ -602,7 +608,6 @@ with tab4:
         total_staked = df_settled['stake'].sum()
         roi = (total_profit / total_staked) * 100 if total_staked > 0 else 0
         
-        # KPI Metrics Row
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Rozliczone Zakłady", total_settled)
         col2.metric("Skuteczność (Win Rate)", f"{win_rate:.1f}%")
@@ -635,7 +640,6 @@ with tab4:
         df_settled['cumulative_profit'] = df_settled['profit'].cumsum()
         df_settled['Kapitał (PLN)'] = bankroll + df_settled['cumulative_profit']
         
-        # Czytelny wykres Altair z linią bazową kapitału początkowego
         base_chart = alt.Chart(df_settled).mark_line(strokeWidth=3, color='#34d399').encode(
             x=alt.X('date:T', title='Data rozliczenia'),
             y=alt.Y('Kapitał (PLN):Q', title='Stan Bankrollu (PLN)', scale=alt.Scale(zero=False)),
@@ -647,4 +651,3 @@ with tab4:
         final_chart = (base_chart + rule).properties(height=400)
         st.altair_chart(final_chart, use_container_width=True)
         st.caption("ℹ️ Czerwona linia przerywana oznacza poziom kapitału początkowego (bankroll startowy). Wszystko powyżej to czysty zysk modelu.")
-     
