@@ -195,27 +195,39 @@ def auto_settle_from_api():
 
 auto_settle_from_api()
 
-# --- POBIERANIE ZAAWANSOWANYCH STATYSTYK DLA NHL I NFL ---
+# --- POBIERANIE STATYSTYK Z STABILNEGO API ESPN DLA NHL ORAZ NFL ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_nhl_stats():
     stats_dict = {}
     try:
-        url = "https://api-web.nhle.com/v1/standings/now"
+        url = "http://site.api.espn.com/apis/v2/sports/hockey/nhl/standings"
         res = requests.get(url, timeout=10)
         if res.status_code == 200:
             data = res.json()
-            for team in data.get("standings", []):
-                name_en = team.get("teamName", {}).get("default", "")
-                place_en = team.get("placeName", {}).get("default", "")
-                full_name = f"{place_en} {name_en}".strip()
-                wins, losses, ot = team.get("wins", 0), team.get("losses", 0), team.get("otLosses", 0)
-                tot = wins + losses + ot
-                win_pct = (wins / tot) if tot > 0 else 0.5
-                gf_g = (team.get("goalFor", 0) / tot) if tot > 0 else 3.0
-                ga_g = (team.get("goalAgainst", 0) / tot) if tot > 0 else 3.0
-                stats_dict[full_name.lower()] = {"win_pct": win_pct, "gf_g": gf_g, "ga_g": ga_g}
-                stats_dict[name_en.lower()] = {"win_pct": win_pct, "gf_g": gf_g, "ga_g": ga_g}
-    except Exception: 
+            for group in data.get("children", []):
+                for team_entry in group.get("standings", {}).get("entries", []):
+                    team_info = team_entry.get("team", {})
+                    name = team_info.get("displayName", "")
+                    nickname = team_info.get("name", "")
+                    
+                    stats = team_entry.get("stats", [])
+                    wins, losses, ot = 0, 0, 0
+                    gf, ga = 0.0, 0.0
+                    for s in stats:
+                        if s.get("name") == "wins": wins = s.get("value", 0)
+                        if s.get("name") == "losses": losses = s.get("value", 0)
+                        if s.get("name") == "otLosses": ot = s.get("value", 0)
+                        if s.get("name") == "pointsFor" or s.get("name") == "goalsFor": gf = s.get("value", 0.0)
+                        if s.get("name") == "pointsAgainst" or s.get("name") == "goalsAgainst": ga = s.get("value", 0.0)
+                        
+                    tot = wins + losses + ot
+                    win_pct = (wins / tot) if tot > 0 else 0.5
+                    gf_g = (gf / tot) if tot > 0 else 3.0
+                    ga_g = (ga / tot) if tot > 0 else 3.0
+                    
+                    stats_dict[name.lower()] = {"win_pct": win_pct, "gf_g": gf_g, "ga_g": ga_g}
+                    stats_dict[nickname.lower()] = {"win_pct": win_pct, "gf_g": gf_g, "ga_g": ga_g}
+    except Exception:
         pass
     return stats_dict
 
@@ -340,19 +352,11 @@ analyzed_handicaps = []
 db_conn = get_db_connection()
 cursor = db_conn.cursor()
 
-# --- PRECYZYJNE DOPASOWANIE NAZW DRUŻYN (Z ALIASAMI NHL) ---
+# --- PRECYZYJNE DOPASOWANIE NAZW DRUŻYN ---
 def find_team_stats(team_name, stats_cache):
     if not stats_cache: return None
     t_lower = team_name.lower()
     if t_lower in stats_cache: return stats_cache[t_lower]
-    
-    nhl_aliases = {
-        "montreal canadiens": "montréal canadiens",
-        "utah hockey club": "utah",
-        "anaheim ducks": "anaheim ducks"
-    }
-    if t_lower in nhl_aliases and nhl_aliases[t_lower] in stats_cache:
-        return stats_cache[nhl_aliases[t_lower]]
     
     for k, v in stats_cache.items():
         if k in t_lower or t_lower in k:
