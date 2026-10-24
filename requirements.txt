@@ -1,10 +1,6 @@
 streamlit
 pandas
 numpy
-xgboost
 requests
-scikit-learn
-nba_api
-altair
-nhl-api-py
 psycopg2-binary
+altair
