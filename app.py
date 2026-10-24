@@ -2,7 +2,9 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-import sqlite3
+import os
+import psycopg2
+from urllib.parse import urlparse
 from datetime import datetime, timezone, timedelta
 import altair as alt
 
@@ -30,9 +32,29 @@ st.markdown("""
 ODDS_API_KEY = "af7b4349b28ca8ffe8a5f2a0722073e2"
 ODDS_BASE_URL = "https://api.the-odds-api.com/v4/sports"
 
-# --- BAZA DANYCH SQLITE Z BEZPIECZNĄ MIGRACJĄ ---
+# --- POŁĄCZENIE Z BAZĄ DANYCH W CHMURZE (NEON.TECH / POSTGRESQL) ---
+def get_db_connection():
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        try:
+            db_url = st.secrets["DATABASE_URL"]
+        except Exception:
+            st.error("Brak skonfigurowanego URL bazy danych w Secrets (DATABASE_URL)!")
+            st.stop()
+            
+    parsed_url = urlparse(db_url)
+    conn = psycopg2.connect(
+        database=parsed_url.path[1:],
+        user=parsed_url.username,
+        password=parsed_url.password,
+        host=parsed_url.hostname,
+        port=parsed_url.port,
+        sslmode='require'
+    )
+    return conn
+
 def init_db():
-    conn = sqlite3.connect("bets_database.db", check_same_thread=False)
+    conn = get_db_connection()
     cursor = conn.cursor()
     
     cursor.execute('''
@@ -54,11 +76,6 @@ def init_db():
         )
     ''')
     
-    try:
-        cursor.execute("ALTER TABLE bets ADD COLUMN bet_type TEXT DEFAULT 'H2H'")
-    except sqlite3.OperationalError:
-        pass
-    
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS weights_history (
             sport TEXT PRIMARY KEY,
@@ -77,27 +94,33 @@ def init_db():
     
     for sport, (w1, w2, w3, w4) in default_weights.items():
         cursor.execute('''
-            INSERT OR IGNORE INTO weights_history (sport, w_win_pct, w_advanced, w_form, w_home)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO weights_history (sport, w_win_pct, w_advanced, w_form, w_home)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (sport) DO NOTHING
         ''', (sport, w1, w2, w3, w4))
         
     conn.commit()
-    return conn
+    cursor.close()
+    conn.close()
 
-db_conn = init_db()
+init_db()
 
 # --- HELPER: POBIERANIE AKTYWNYCH WAG ---
 def get_sport_weights(sport_name):
-    cursor = db_conn.cursor()
-    cursor.execute("SELECT w_win_pct, w_advanced, w_form, w_home FROM weights_history WHERE sport = ?", (sport_name,))
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT w_win_pct, w_advanced, w_form, w_home FROM weights_history WHERE sport = %s", (sport_name,))
     row = cursor.fetchone()
+    cursor.close()
+    conn.close()
     if row:
         return {"win_pct": row[0], "advanced": row[1], "form": row[2], "home": row[3]}
     return {"win_pct": 0.30, "advanced": 0.35, "form": 0.20, "home": 0.15}
 
 # --- MODUŁ UCZENIA SIĘ WAG (FEEDBACK LOOP) ---
 def update_weights_after_settlement(sport_name, bet_won):
-    cursor = db_conn.cursor()
+    conn = get_db_connection()
+    cursor = conn.cursor()
     w = get_sport_weights(sport_name)
     lr = 0.01 if bet_won else -0.01
     
@@ -113,18 +136,23 @@ def update_weights_after_settlement(sport_name, bet_won):
     
     cursor.execute('''
         UPDATE weights_history 
-        SET w_win_pct = ?, w_advanced = ?, w_form = ?, w_home = ?
-        WHERE sport = ?
+        SET w_win_pct = %s, w_advanced = %s, w_form = %s, w_home = %s
+        WHERE sport = %s
     ''', (nw_win, nw_adv, nw_form, nw_home, sport_name))
-    db_conn.commit()
+    conn.commit()
+    cursor.close()
+    conn.close()
 
 # --- AUTOMATYCZNE ROZLICZANIE ZAKŁADÓW Z API (SCORES) ---
 def auto_settle_from_api():
-    cursor = db_conn.cursor()
+    conn = get_db_connection()
+    cursor = conn.cursor()
     cursor.execute("SELECT id, sport, odds, stake, best_pick, home_team, away_team FROM bets WHERE status = 'Oczekujący'")
     pending_bets = cursor.fetchall()
     
     if not pending_bets:
+        cursor.close()
+        conn.close()
         return
 
     sport_keys = {
@@ -163,11 +191,13 @@ def auto_settle_from_api():
                                         status = 'Przegrany'
                                         profit = round(-stake, 2)
                                         
-                                    cursor.execute("UPDATE bets SET status = ?, profit = ? WHERE id = ?", (status, profit, bet_id))
-                                    db_conn.commit()
+                                    cursor.execute("UPDATE bets SET status = %s, profit = %s WHERE id = %s", (status, profit, bet_id))
+                                    conn.commit()
                                     update_weights_after_settlement(sport_name, won)
         except Exception:
             pass
+    cursor.close()
+    conn.close()
 
 auto_settle_from_api()
 
@@ -247,7 +277,7 @@ nfl_stats_cache = fetch_nfl_stats()
 # --- PANEL BOCZNY ---
 with st.sidebar:
     st.markdown("### 🎯 Maksbet.app")
-    st.caption("Autonomous Quant Engine")
+    st.caption("Autonomous Quant Engine (Cloud)")
     st.markdown("---")
     
     discipline = st.selectbox("Dyscyplina", ["🏀 NBA Koszykówka", "🏒 NHL Hokej", "🏈 NFL Futbol Amerykański"])
@@ -264,9 +294,12 @@ with st.sidebar:
     st.caption(f"・ Home Advantage: {round(curr_weights['home']*100, 1)}%")
     
     st.markdown("---")
-    cursor = db_conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM bets")
-    total_tracked = cursor.fetchone()[0]
+    conn_tmp = get_db_connection()
+    cur_tmp = conn_tmp.cursor()
+    cur_tmp.execute("SELECT COUNT(*) FROM bets")
+    total_tracked = cur_tmp.fetchone()[0]
+    cur_tmp.close()
+    conn_tmp.close()
     st.metric("Monitorowane zakłady", total_tracked)
 
 # --- POBIERANIE KURSÓW I HANDICAPÓW Z THE ODDS API ---
@@ -330,6 +363,8 @@ def fetch_odds_and_spreads(d_key):
 raw_matches, api_debug = fetch_odds_and_spreads(key)
 analyzed_h2h = []
 analyzed_handicaps = []
+
+db_conn = get_db_connection()
 cursor = db_conn.cursor()
 
 def find_team_stats(team_name, stats_cache):
@@ -369,7 +404,7 @@ for m in raw_matches:
         a_s = find_team_stats(m['away'], nhl_stats_cache)
         if h_s and a_s:
             wd = h_s["win_pct"] - a_s["win_pct"]
-            gf_diff = (h_s["gf_g"] - a_s["ga_g"]) - (a_s["gf_g"] - h_s["ga_g"])
+            gf_diff = (h_s["gf_g"] - a_s["ga_g"]) - (a_s["gf_g"] - a_s["ga_g"])
             stat_delta = (wd * w["win_pct"] * 0.08) + (gf_diff * w["advanced"] * 0.05)
             expected_margin = gf_diff + (w["home"] * 0.3)
             
@@ -398,11 +433,11 @@ for m in raw_matches:
     stake = min(bankroll * 0.04, max(0, bankroll * kelly_f * kelly_fraction))
     
     if best_edge >= min_edge_slider and stake > 0:
-        cursor.execute("SELECT id FROM bets WHERE id = ?", (match_id,))
+        cursor.execute("SELECT id FROM bets WHERE id = %s", (match_id,))
         if not cursor.fetchone():
             cursor.execute(
-                "INSERT INTO bets VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Oczekujący', 0.0, ?, ?, ?, 'H2H')",
-                (match_id, datetime.now().strftime("%Y-%m-%d"), discipline, match_name, best_odds, best_prob, best_edge, stake, m['home'], m['away'], best_pick)
+                "INSERT INTO bets VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'Oczekujący', 0.0, %s, %s, %s, 'H2H')",
+                (match_id, datetime.now().strftime("%Y-%m-%d"), discipline, match_name, float(best_odds), float(best_prob), float(best_edge), float(stake), m['home'], m['away'], best_pick)
             )
             db_conn.commit()
 
@@ -452,11 +487,11 @@ for m in raw_matches:
         
         if hc_edge >= min_edge_slider and stake_hc > 0:
             hc_bet_id = f"{match_id}_hc"
-            cursor.execute("SELECT id FROM bets WHERE id = ?", (hc_bet_id,))
+            cursor.execute("SELECT id FROM bets WHERE id = %s", (hc_bet_id,))
             if not cursor.fetchone():
                 cursor.execute(
-                    "INSERT INTO bets VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Oczekujący', 0.0, ?, ?, ?, 'HANDICAP')",
-                    (hc_bet_id, datetime.now().strftime("%Y-%m-%d"), discipline, f"{match_name} [HANDICAP]", hc_odds, hc_prob, hc_edge, stake_hc, m['home'], m['away'], hc_pick)
+                    "INSERT INTO bets VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'Oczekujący', 0.0, %s, %s, %s, 'HANDICAP')",
+                    (hc_bet_id, datetime.now().strftime("%Y-%m-%d"), discipline, f"{match_name} [HANDICAP]", float(hc_odds), float(hc_prob), float(hc_edge), float(stake_hc), m['home'], m['away'], hc_pick)
                 )
                 db_conn.commit()
 
@@ -470,11 +505,14 @@ for m in raw_matches:
             })
             analyzed_handicaps.append(m_hc)
 
+cursor.close()
+db_conn.close()
+
 analyzed_h2h.sort(key=lambda x: x['edge'], reverse=True)
 analyzed_handicaps.sort(key=lambda x: x['edge'], reverse=True)
 
 # --- INTERFEJS GŁÓWNY ---
-st.markdown("## ⚡ Dashboard Kwantowy & Performance Live")
+st.markdown("## ⚡ Dashboard Kwantowy & Performance Live (Cloud DB)")
 tab1, tab_hc, tab2, tab3, tab4 = st.tabs(["🔥 Sygnały Value (H2H)", "🎯 Analiza Handicapów", "🛡️ Terminal Diagnostyczny", "📁 Rejestr & Rozliczenia", "📈 Zaawansowana Analityka & ROI"])
 
 with tab1:
@@ -523,7 +561,7 @@ with tab_hc:
 
 with tab2:
     st.subheader("🛡️ Terminal Diagnostyczny Systemu")
-    st.caption("Weryfikacja API, neutralności marży oraz stanu sieci wag")
+    st.caption("Weryfikacja API, neutralności marży oraz chmurowej bazy danych")
     
     status_icon = "✅ OK" if api_debug["status_code"] == 200 and api_debug["total_raw"] > 0 else "❌ Błąd / Brak danych"
     st.markdown(f"""
@@ -553,68 +591,44 @@ with tab2:
         """, unsafe_allow_html=True)
         
     try:
-        cursor.execute("SELECT COUNT(*) FROM bets")
-        db_count = cursor.fetchone()[0]
-        db_status = f"✅ OK ({db_count} rekordów w tabeli)"
+        conn_t = get_db_connection()
+        cur_t = conn_t.cursor()
+        cur_t.execute("SELECT COUNT(*) FROM bets")
+        db_count = cur_t.fetchone()[0]
+        cur_t.close()
+        conn_t.close()
+        db_status = f"✅ OK (Chmura PostgreSQL aktywna - {db_count} rekordów)"
     except Exception as e:
-        db_status = f"❌ Błąd: {e}"
+        db_status = f"❌ Błąd chmury: {e}"
         
     st.markdown(f"""
         <div class="test-box">
-        <b>[TEST 3] Integralność bazy danych i silnika wag:</b><br>
-        Połączenie z plikiem `bets_database.db`: {db_status}
+        <b>[TEST 3] Połączenie z bazą danych w chmurze (Neon.tech):</b><br>
+        Status: {db_status}
         </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("---")
-    st.markdown("### ⚠️ Strefa Zarządzania Bazą")
-    if st.button("🗑️ Resetuj / Wyczyść całą bazę danych"):
-        cursor.execute("DROP TABLE IF EXISTS bets")
-        cursor.execute("DROP TABLE IF EXISTS weights_history")
-        db_conn.commit()
-        st.success("Baza danych została w pełni zresetowana! Odśwież stronę (F5), aby zacząć od nowa.")
-        st.rerun()
-
 with tab3:
-    st.subheader("📁 Rejestr Zakładów & Rozliczanie (Feedback Loop)")
-    df_bets = pd.read_sql("SELECT * FROM bets", db_conn)
+    st.subheader("📁 Rejestr Zakładów (Autonomiczne Śledzenie)")
+    conn_b = get_db_connection()
+    df_bets = pd.read_sql("SELECT * FROM bets", conn_b)
+    conn_b.close()
+    
     if df_bets.empty: 
-        st.info("Brak zapisanych zakładów.")
+        st.info("Brak zapisanych zakładów w chmurze.")
     else: 
         st.dataframe(df_bets, use_container_width=True)
-        
-        st.markdown("---")
-        st.markdown("### ⚖️ Ręczna korekta / rozliczenie")
-        pending_bets = df_bets[df_bets['status'] == 'Oczekujący']
-        if not pending_bets.empty:
-            selected_bet_id = st.selectbox("Wybierz mecz do ręcznego rozliczenia", pending_bets['id'].tolist(), format_func=lambda x: pending_bets[pending_bets['id']==x]['match_name'].values[0])
-            bet_row = pending_bets[pending_bets['id'] == selected_bet_id].iloc[0]
-            
-            col_a, col_b = st.columns(2)
-            with col_a:
-                if st.button("✅ Wygrana (Ucz wagi +)"):
-                    profit = (bet_row['odds'] - 1.0) * bet_row['stake']
-                    cursor.execute("UPDATE bets SET status='Wygrany', profit=? WHERE id=?", (profit, selected_bet_id))
-                    db_conn.commit()
-                    update_weights_after_settlement(bet_row['sport'], True)
-                    st.success("Zakład rozliczony jako WYGRANY! Wagi modelu zostały zaktualizowane.")
-                    st.rerun()
-            with col_b:
-                if st.button("❌ Porażka (Ucz wagi -)"):
-                    profit = -bet_row['stake']
-                    cursor.execute("UPDATE bets SET status='Przegrany', profit=? WHERE id=?", (profit, selected_bet_id))
-                    db_conn.commit()
-                    update_weights_after_settlement(bet_row['sport'], False)
-                    st.error("Zakład rozliczony jako PRZEGRANY. Model skorygował wagi.")
-                    st.rerun()
+        st.caption("ℹ️ Zakłady są automatycznie rozliczane w tle przez system po zakończeniu spotkań w API. Panel ręcznej korekty został usunięty dla pełnej autonomii.")
 
 with tab4:
     st.subheader("📈 Zaawansowana Analityka Skuteczności & ROI Live")
     
-    df_settled = pd.read_sql("SELECT * FROM bets WHERE status != 'Oczekujący'", db_conn)
+    conn_s = get_db_connection()
+    df_settled = pd.read_sql("SELECT * FROM bets WHERE status != 'Oczekujący'", conn_s)
+    conn_s.close()
     
     if df_settled.empty:
-        st.info("Brak rozliczonych zakładów. Rozlicz pierwsze zakłady w zakładce 'Rejestr & Rozliczenia', aby wygenerować pełny raport statystyczny.")
+        st.info("Brak rozliczonych zakładów w chmurze. Analityka i ROI zaczną zapełniać się automatycznie, gdy pierwsze mecze z statusom 'Oczekujący' zostaną rozliczone przez API Scores.")
     else:
         total_settled = len(df_settled)
         won_bets = len(df_settled[df_settled['status'] == 'Wygrany'])
