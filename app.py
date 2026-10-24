@@ -9,7 +9,7 @@ import altair as alt
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(
-    page_title="Maksbet.app - Autonomous Quant Engine",
+    page_title="Maksbet.app - Autonomous Quant Engine (NHL & NFL)",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -83,7 +83,6 @@ def init_db():
     ''')
     
     default_weights = {
-        "🏀 NBA Koszykówka": (0.30, 0.35, 0.20, 0.15),
         "🏒 NHL Hokej": (0.25, 0.40, 0.20, 0.15),
         "🏈 NFL Futbol Amerykański": (0.35, 0.35, 0.15, 0.15)
     }
@@ -152,7 +151,6 @@ def auto_settle_from_api():
         return
 
     sport_keys = {
-        "🏀 NBA Koszykówka": "basketball_nba",
         "🏒 NHL Hokej": "icehockey_nhl",
         "🏈 NFL Futbol Amerykański": "americanfootball_nfl"
     }
@@ -197,7 +195,7 @@ def auto_settle_from_api():
 
 auto_settle_from_api()
 
-# --- POBIERANIE STATYSTYK Z OFICJALNYCH API ---
+# --- POBIERANIE ZAAWANSOWANYCH STATYSTYK DLA NHL I NFL ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_nhl_stats():
     stats_dict = {}
@@ -217,22 +215,6 @@ def fetch_nhl_stats():
                 ga_g = (team.get("goalAgainst", 0) / tot) if tot > 0 else 3.0
                 stats_dict[full_name.lower()] = {"win_pct": win_pct, "gf_g": gf_g, "ga_g": ga_g}
                 stats_dict[name_en.lower()] = {"win_pct": win_pct, "gf_g": gf_g, "ga_g": ga_g}
-    except Exception: 
-        pass
-    return stats_dict
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_nba_stats():
-    stats_dict = {}
-    try:
-        from nba_api.stats.endpoints import leaguestandings
-        standings = leaguestandings.LeagueStandings().get_data_frames()[0]
-        for _, row in standings.iterrows():
-            city, name = str(row.get('TeamCity', '')), str(row.get('TeamName', ''))
-            full_name = f"{city} {name}".strip()
-            win_pct = float(row.get('WinPCT', 0.5))
-            stats_dict[full_name.lower()] = {"win_pct": win_pct}
-            stats_dict[name.lower()] = {"win_pct": win_pct}
     except Exception: 
         pass
     return stats_dict
@@ -268,16 +250,15 @@ def fetch_nfl_stats():
     return stats_dict
 
 nhl_stats_cache = fetch_nhl_stats()
-nba_stats_cache = fetch_nba_stats()
 nfl_stats_cache = fetch_nfl_stats()
 
 # --- PANEL BOCZNY ---
 with st.sidebar:
     st.markdown("### 🎯 Maksbet.app")
-    st.caption("Autonomous Quant Engine (Cloud)")
+    st.caption("Autonomous Quant Engine (NHL & NFL)")
     st.markdown("---")
     
-    discipline = st.selectbox("Dyscyplina", ["🏀 NBA Koszykówka", "🏒 NHL Hokej", "🏈 NFL Futbol Amerykański"])
+    discipline = st.selectbox("Dyscyplina", ["🏒 NHL Hokej", "🏈 NFL Futbol Amerykański"])
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
     min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.0, max_value=10.0, value=0.5, step=0.5) / 100.0
@@ -300,12 +281,7 @@ with st.sidebar:
     st.metric("Monitorowane zakłady", total_tracked)
 
 # --- POBIERANIE KURSÓW I HANDICAPÓW Z THE ODDS API ---
-if "NBA" in discipline:
-    key = "basketball_nba"
-elif "NHL" in discipline:
-    key = "icehockey_nhl"
-else:
-    key = "americanfootball_nfl"
+key = "icehockey_nhl" if "NHL" in discipline else "americanfootball_nfl"
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_odds_and_spreads(d_key):
@@ -370,12 +346,10 @@ def find_team_stats(team_name, stats_cache):
     t_lower = team_name.lower()
     if t_lower in stats_cache: return stats_cache[t_lower]
     
-    # Dopasowanie po fragmencie (np. nazwa zespołu lub miasto)
     for k, v in stats_cache.items():
         if k in t_lower or t_lower in k:
             return v
             
-    # Podwójne dopasowanie po słowach kluczowych (np. ostatni członek nazwy: "Lakers", "Celtics")
     team_tokens = t_lower.split()
     for token in team_tokens:
         if len(token) > 3:
@@ -390,22 +364,17 @@ for m in raw_matches:
     match_name = f"{m['home']} vs {m['away']}"
     odds_home, odds_away = m['odds_home'], m['odds_away']
     
-    # Pobieramy statystyki wyłącznie z oficjalnych cache'y
-    if "NBA" in discipline:
-        h_s = find_team_stats(m['home'], nba_stats_cache)
-        a_s = find_team_stats(m['away'], nba_stats_cache)
-    elif "NHL" in discipline:
+    if "NHL" in discipline:
         h_s = find_team_stats(m['home'], nhl_stats_cache)
         a_s = find_team_stats(m['away'], nhl_stats_cache)
     else:
         h_s = find_team_stats(m['home'], nfl_stats_cache)
         a_s = find_team_stats(m['away'], nfl_stats_cache)
         
-    # Jeśli brakuje statystyk dla którejkolwiek drużyny w oficjalnym API, pomijamy mecz (brak halucynacji)
     if not h_s or not a_s:
         continue
 
-    # --- 1. MODEL H2H OPARTE NA CZYSTEJ MATEMATYCE I STATYSTYCE ---
+    # --- 1. MODEL H2H (CZYSTA MATEMATYKA & STATYSTYKA) ---
     prob_raw_h = 1.0 / odds_home if odds_home > 0 else 0.5
     prob_raw_a = 1.0 / odds_away if odds_away > 0 else 0.5
     tot_v = prob_raw_h + prob_raw_a
@@ -416,17 +385,11 @@ for m in raw_matches:
     stat_delta = 0.0
     expected_margin = 0.0
     
-    if "NBA" in discipline:
-        wd = h_s.get("win_pct", 0.5) - a_s.get("win_pct", 0.5)
-        stat_delta = wd * (w["win_pct"] * 0.20 + w["advanced"] * 0.15)
-        expected_margin = wd * 12.0 + (w["home"] * 3.5)
-            
-    elif "NHL" in discipline:
+    if "NHL" in discipline:
         wd = h_s.get("win_pct", 0.5) - a_s.get("win_pct", 0.5)
         gf_diff = (h_s.get("gf_g", 3.0) - a_s.get("ga_g", 3.0)) - (a_s.get("gf_g", 3.0) - h_s.get("ga_g", 3.0))
         stat_delta = (wd * w["win_pct"] * 0.15) + (gf_diff * w["advanced"] * 0.20)
         expected_margin = gf_diff + (w["home"] * 0.3)
-            
     else:
         wd = h_s.get("win_pct", 0.5) - a_s.get("win_pct", 0.5)
         pd_diff = (h_s.get("point_diff", 0.0) - a_s.get("point_diff", 0.0)) / 50.0
@@ -479,7 +442,7 @@ for m in raw_matches:
         p_tot_s = p_raw_sh + p_raw_sa
         mkt_hc_home = p_raw_sh / p_tot_s if p_tot_s > 0 else 0.5
         
-        scale_factor = 22.0 if "NBA" in discipline else (6.0 if "NHL" in discipline else 24.0)
+        scale_factor = 6.0 if "NHL" in discipline else 24.0
         model_hc_home = 1.0 / (1.0 + np.exp(-expected_margin / scale_factor))
         
         prob_hc_home = (0.85 * mkt_hc_home) + (0.15 * model_hc_home)
@@ -527,7 +490,7 @@ analyzed_h2h.sort(key=lambda x: x['edge'], reverse=True)
 analyzed_handicaps.sort(key=lambda x: x['edge'], reverse=True)
 
 # --- INTERFEJS GŁÓWNY ---
-st.markdown("## ⚡ Dashboard Kwantowy & Performance Live (Cloud DB)")
+st.markdown("## ⚡ Dashboard Kwantowy & Performance Live (NHL & NFL)")
 tab1, tab_hc, tab2, tab3, tab4 = st.tabs(["🔥 Sygnały Value (H2H)", "🎯 Analiza Handicapów", "🛡️ Terminal Diagnostyczny", "📁 Rejestr & Rozliczenia", "📈 Zaawansowana Analityka & ROI"])
 
 with tab1:
