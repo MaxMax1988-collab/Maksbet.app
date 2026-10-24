@@ -4,7 +4,6 @@ import numpy as np
 import requests
 import os
 import psycopg2
-from urllib.parse import urlparse
 from datetime import datetime, timezone, timedelta
 import altair as alt
 
@@ -32,7 +31,7 @@ st.markdown("""
 ODDS_API_KEY = "af7b4349b28ca8ffe8a5f2a0722073e2"
 ODDS_BASE_URL = "https://api.the-odds-api.com/v4/sports"
 
-# --- POŁĄCZENIE Z BAZĄ DANYCH W CHMURZE (NEON.TECH / POSTGRESQL) ---
+# --- POŁĄCZENIE Z BAZĄ DANYCH W CHMURZE (NEON.TECH) ---
 def get_db_connection():
     db_url = os.getenv("DATABASE_URL")
     if not db_url:
@@ -42,15 +41,8 @@ def get_db_connection():
             st.error("Brak skonfigurowanego URL bazy danych w Secrets (DATABASE_URL)!")
             st.stop()
             
-    parsed_url = urlparse(db_url)
-    conn = psycopg2.connect(
-        database=parsed_url.path[1:],
-        user=parsed_url.username,
-        password=parsed_url.password,
-        host=parsed_url.hostname,
-        port=parsed_url.port,
-        sslmode='require'
-    )
+    # Bezpośrednie połączenie przy użyciu pełnego Connection Stringa z Neon.tech
+    conn = psycopg2.connect(db_url)
     return conn
 
 def init_db():
