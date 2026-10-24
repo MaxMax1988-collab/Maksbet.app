@@ -340,11 +340,19 @@ analyzed_handicaps = []
 db_conn = get_db_connection()
 cursor = db_conn.cursor()
 
-# --- PRECYZYJNE DOPASOWANIE NAZW DRUŻYN (BEZ HALUCYNACJI) ---
+# --- PRECYZYJNE DOPASOWANIE NAZW DRUŻYN (Z ALIASAMI NHL) ---
 def find_team_stats(team_name, stats_cache):
     if not stats_cache: return None
     t_lower = team_name.lower()
     if t_lower in stats_cache: return stats_cache[t_lower]
+    
+    nhl_aliases = {
+        "montreal canadiens": "montréal canadiens",
+        "utah hockey club": "utah",
+        "anaheim ducks": "anaheim ducks"
+    }
+    if t_lower in nhl_aliases and nhl_aliases[t_lower] in stats_cache:
+        return stats_cache[nhl_aliases[t_lower]]
     
     for k, v in stats_cache.items():
         if k in t_lower or t_lower in k:
