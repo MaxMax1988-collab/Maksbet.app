@@ -41,7 +41,11 @@ def get_db_connection():
             st.error("Brak skonfigurowanego URL bazy danych w Secrets (DATABASE_URL)!")
             st.stop()
             
-    # Bezpośrednie połączenie przy użyciu pełnego Connection Stringa z Neon.tech
+    if "&channel_binding=require" in db_url:
+        db_url = db_url.replace("&channel_binding=require", "")
+    elif "?channel_binding=require" in db_url:
+        db_url = db_url.replace("?channel_binding=require", "")
+
     conn = psycopg2.connect(db_url)
     return conn
 
@@ -196,12 +200,12 @@ auto_settle_from_api()
 # --- POBIERANIE STATYSTYK Z OFICJALNYCH API ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_nhl_stats():
+    stats_dict = {}
     try:
         url = "https://api-web.nhle.com/v1/standings/now"
         res = requests.get(url, timeout=10)
         if res.status_code == 200:
             data = res.json()
-            stats_dict = {}
             for team in data.get("standings", []):
                 name_en = team.get("teamName", {}).get("default", "")
                 place_en = team.get("placeName", {}).get("default", "")
@@ -211,33 +215,34 @@ def fetch_nhl_stats():
                 win_pct = (wins / tot) if tot > 0 else 0.5
                 gf_g = (team.get("goalFor", 0) / tot) if tot > 0 else 3.0
                 ga_g = (team.get("goalAgainst", 0) / tot) if tot > 0 else 3.0
-                stats_dict[full_name] = {"win_pct": win_pct, "gf_g": gf_g, "ga_g": ga_g}
-                stats_dict[name_en] = {"win_pct": win_pct, "gf_g": gf_g, "ga_g": ga_g}
-            return stats_dict
-    except Exception: pass
-    return {}
+                stats_dict[full_name.lower()] = {"win_pct": win_pct, "gf_g": gf_g, "ga_g": ga_g}
+                stats_dict[name_en.lower()] = {"win_pct": win_pct, "gf_g": gf_g, "ga_g": ga_g}
+    except Exception: 
+        pass
+    return stats_dict
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_nba_stats():
+    stats_dict = {}
     try:
         from nba_api.stats.endpoints import leaguestandings
         standings = leaguestandings.LeagueStandings().get_data_frames()[0]
-        stats_dict = {}
         for _, row in standings.iterrows():
             city, name = str(row.get('TeamCity', '')), str(row.get('TeamName', ''))
             full_name = f"{city} {name}".strip()
             win_pct = float(row.get('WinPCT', 0.5))
-            stats_dict[full_name] = {"win_pct": win_pct}
-            stats_dict[name] = {"win_pct": win_pct}
-        return stats_dict
-    except Exception: return {}
+            stats_dict[full_name.lower()] = {"win_pct": win_pct}
+            stats_dict[name.lower()] = {"win_pct": win_pct}
+    except Exception: 
+        pass
+    return stats_dict
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_nfl_stats():
+    stats_dict = {}
     try:
         url = "http://site.api.espn.com/apis/v2/sports/football/nfl/standings"
         res = requests.get(url, timeout=10)
-        stats_dict = {}
         if res.status_code == 200:
             data = res.json()
             for group in data.get("children", []):
@@ -256,11 +261,11 @@ def fetch_nfl_stats():
                         
                     tot = wins + losses
                     win_pct = (wins / tot) if tot > 0 else 0.5
-                    stats_dict[name] = {"win_pct": win_pct, "point_diff": point_diff}
-                    stats_dict[nickname] = {"win_pct": win_pct, "point_diff": point_diff}
-        return stats_dict
+                    stats_dict[name.lower()] = {"win_pct": win_pct, "point_diff": point_diff}
+                    stats_dict[nickname.lower()] = {"win_pct": win_pct, "point_diff": point_diff}
     except Exception:
-        return {}
+        pass
+    return stats_dict
 
 nhl_stats_cache = fetch_nhl_stats()
 nba_stats_cache = fetch_nba_stats()
@@ -275,7 +280,7 @@ with st.sidebar:
     discipline = st.selectbox("Dyscyplina", ["🏀 NBA Koszykówka", "🏒 NHL Hokej", "🏈 NFL Futbol Amerykański"])
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
-    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.5, max_value=10.0, value=1.5, step=0.5) / 100.0
+    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.0, max_value=10.0, value=0.5, step=0.5) / 100.0
     
     curr_weights = get_sport_weights(discipline)
     st.markdown("---")
@@ -359,12 +364,25 @@ analyzed_handicaps = []
 db_conn = get_db_connection()
 cursor = db_conn.cursor()
 
+# --- PRECYZYJNE DOPASOWANIE NAZW DRUŻYN (BEZ HALUCYNACJI) ---
 def find_team_stats(team_name, stats_cache):
     if not stats_cache: return None
-    if team_name in stats_cache: return stats_cache[team_name]
+    t_lower = team_name.lower()
+    if t_lower in stats_cache: return stats_cache[t_lower]
+    
+    # Dopasowanie po fragmencie (np. nazwa zespołu lub miasto)
     for k, v in stats_cache.items():
-        if k.lower() in team_name.lower() or team_name.lower() in k.lower():
+        if k in t_lower or t_lower in k:
             return v
+            
+    # Podwójne dopasowanie po słowach kluczowych (np. ostatni członek nazwy: "Lakers", "Celtics")
+    team_tokens = t_lower.split()
+    for token in team_tokens:
+        if len(token) > 3:
+            for k, v in stats_cache.items():
+                if token in k:
+                    return v
+                    
     return None
 
 for m in raw_matches:
@@ -372,7 +390,22 @@ for m in raw_matches:
     match_name = f"{m['home']} vs {m['away']}"
     odds_home, odds_away = m['odds_home'], m['odds_away']
     
-    # --- 1. MODEL H2H ---
+    # Pobieramy statystyki wyłącznie z oficjalnych cache'y
+    if "NBA" in discipline:
+        h_s = find_team_stats(m['home'], nba_stats_cache)
+        a_s = find_team_stats(m['away'], nba_stats_cache)
+    elif "NHL" in discipline:
+        h_s = find_team_stats(m['home'], nhl_stats_cache)
+        a_s = find_team_stats(m['away'], nhl_stats_cache)
+    else:
+        h_s = find_team_stats(m['home'], nfl_stats_cache)
+        a_s = find_team_stats(m['away'], nfl_stats_cache)
+        
+    # Jeśli brakuje statystyk dla którejkolwiek drużyny w oficjalnym API, pomijamy mecz (brak halucynacji)
+    if not h_s or not a_s:
+        continue
+
+    # --- 1. MODEL H2H OPARTE NA CZYSTEJ MATEMATYCE I STATYSTYCE ---
     prob_raw_h = 1.0 / odds_home if odds_home > 0 else 0.5
     prob_raw_a = 1.0 / odds_away if odds_away > 0 else 0.5
     tot_v = prob_raw_h + prob_raw_a
@@ -384,30 +417,21 @@ for m in raw_matches:
     expected_margin = 0.0
     
     if "NBA" in discipline:
-        h_s = find_team_stats(m['home'], nba_stats_cache)
-        a_s = find_team_stats(m['away'], nba_stats_cache)
-        if h_s and a_s:
-            wd = h_s["win_pct"] - a_s["win_pct"]
-            stat_delta = wd * (w["win_pct"] * 0.08 + w["advanced"] * 0.05)
-            expected_margin = wd * 12.0 + (w["home"] * 3.5)
+        wd = h_s.get("win_pct", 0.5) - a_s.get("win_pct", 0.5)
+        stat_delta = wd * (w["win_pct"] * 0.20 + w["advanced"] * 0.15)
+        expected_margin = wd * 12.0 + (w["home"] * 3.5)
             
     elif "NHL" in discipline:
-        h_s = find_team_stats(m['home'], nhl_stats_cache)
-        a_s = find_team_stats(m['away'], nhl_stats_cache)
-        if h_s and a_s:
-            wd = h_s["win_pct"] - a_s["win_pct"]
-            gf_diff = (h_s["gf_g"] - a_s["ga_g"]) - (a_s["gf_g"] - a_s["ga_g"])
-            stat_delta = (wd * w["win_pct"] * 0.08) + (gf_diff * w["advanced"] * 0.05)
-            expected_margin = gf_diff + (w["home"] * 0.3)
+        wd = h_s.get("win_pct", 0.5) - a_s.get("win_pct", 0.5)
+        gf_diff = (h_s.get("gf_g", 3.0) - a_s.get("ga_g", 3.0)) - (a_s.get("gf_g", 3.0) - h_s.get("ga_g", 3.0))
+        stat_delta = (wd * w["win_pct"] * 0.15) + (gf_diff * w["advanced"] * 0.20)
+        expected_margin = gf_diff + (w["home"] * 0.3)
             
     else:
-        h_s = find_team_stats(m['home'], nfl_stats_cache)
-        a_s = find_team_stats(m['away'], nfl_stats_cache)
-        if h_s and a_s:
-            wd = h_s["win_pct"] - a_s["win_pct"]
-            pd_diff = (h_s["point_diff"] - a_s["point_diff"]) / 50.0
-            stat_delta = (wd * w["win_pct"] * 0.08) + (pd_diff * w["advanced"] * 0.05)
-            expected_margin = (pd_diff * 7.0) + (w["home"] * 2.5)
+        wd = h_s.get("win_pct", 0.5) - a_s.get("win_pct", 0.5)
+        pd_diff = (h_s.get("point_diff", 0.0) - a_s.get("point_diff", 0.0)) / 50.0
+        stat_delta = (wd * w["win_pct"] * 0.15) + (pd_diff * w["advanced"] * 0.20)
+        expected_margin = (pd_diff * 7.0) + (w["home"] * 2.5)
         
     ai_prob_home = np.clip(implied_h + stat_delta, 0.05, 0.95)
     ai_prob_away = 1.0 - ai_prob_home
@@ -445,7 +469,7 @@ for m in raw_matches:
         })
         analyzed_h2h.append(m_copy)
 
-    # --- 2. ZABEZPIECZONY MODEL HANDICAPÓW (BAYESIAN ANCHORED) ---
+    # --- 2. ZABEZPIECZONY MODEL HANDICAPÓW ---
     sh_line, sa_line = m['spread_home_line'], m['spread_away_line']
     sh_odds, sa_odds = m['spread_home_odds'], m['spread_away_odds']
     
@@ -458,7 +482,6 @@ for m in raw_matches:
         scale_factor = 22.0 if "NBA" in discipline else (6.0 if "NHL" in discipline else 24.0)
         model_hc_home = 1.0 / (1.0 + np.exp(-expected_margin / scale_factor))
         
-        # Kotwiczenie Bayesian: 85% Rynek / 15% Model
         prob_hc_home = (0.85 * mkt_hc_home) + (0.15 * model_hc_home)
         prob_hc_home = np.clip(prob_hc_home, 0.35, 0.65)
         prob_hc_away = 1.0 - prob_hc_home
@@ -509,10 +532,10 @@ tab1, tab_hc, tab2, tab3, tab4 = st.tabs(["🔥 Sygnały Value (H2H)", "🎯 Ana
 
 with tab1:
     st.subheader(f"Terminal Analityczny H2H: {discipline}")
-    st.caption("Model No-Vig zasilany statystykami oficjalnych lig")
+    st.caption("Model No-Vig zasilany wyłącznie twardymi statystykami oficjalnych lig")
     
     if not analyzed_h2h:
-        st.warning("Brak nadchodzących spotkań H2H spełniających kryteria dodatniego Value w tym momencie.")
+        st.warning("Brak spotkań spełniających rygorystyczne kryterium statystycznego Edge w tym oknie czasowym.")
     else:
         for m in analyzed_h2h:
             edge_pct = round(m['edge'] * 100, 1)
@@ -534,7 +557,7 @@ with tab_hc:
     st.caption("Zaawansowany model Sigmoid z kotwiczeniem rynkowym")
     
     if not analyzed_handicaps:
-        st.info("Brak zyskownych linii handicapowych spełniających minimalne kryterium Edge w tym oknie czasowym.")
+        st.info("Brak linii handicapowych spełniających rygorystyczne kryterium statystyczne Edge.")
     else:
         for m in analyzed_handicaps:
             edge_pct = round(m['edge'] * 100, 1)
@@ -610,7 +633,7 @@ with tab3:
         st.info("Brak zapisanych zakładów w chmurze.")
     else: 
         st.dataframe(df_bets, use_container_width=True)
-        st.caption("ℹ️ Zakłady są automatycznie rozliczane w tle przez system po zakończeniu spotkań w API. Panel ręcznej korekty został usunięty dla pełnej autonomii.")
+        st.caption("ℹ️ Zakłady są automatycznie rozliczane w tle przez system po zakończeniu spotkań w API.")
 
 with tab4:
     st.subheader("📈 Zaawansowana Analityka Skuteczności & ROI Live")
@@ -620,7 +643,7 @@ with tab4:
     conn_s.close()
     
     if df_settled.empty:
-        st.info("Brak rozliczonych zakładów w chmurze. Analityka i ROI zaczną zapełniać się automatycznie, gdy pierwsze mecze z statusom 'Oczekujący' zostaną rozliczone przez API Scores.")
+        st.info("Brak rozliczonych zakładów w chmurze. Analityka i ROI zaczną zapełniać się automatycznie, gdy pierwsze mecze zostaną rozliczone przez API Scores.")
     else:
         total_settled = len(df_settled)
         won_bets = len(df_settled[df_settled['status'] == 'Wygrany'])
@@ -634,41 +657,3 @@ with tab4:
         col2.metric("Skuteczność (Win Rate)", f"{win_rate:.1f}%")
         col3.metric("Całkowity Zysk / Strata", f"{total_profit:.2f} PLN", delta=f"{total_profit:.2f} PLN")
         col4.metric("ROI Modelu", f"{roi:.2f}%", delta=f"{roi:.2f}%")
-        
-        st.markdown("---")
-        st.subheader("📊 Analiza wg Dyscyplin i Typu Zakładów")
-        
-        col_m1, col_m2 = st.columns(2)
-        with col_m1:
-            st.markdown("##### Skuteczność per Sport")
-            sport_perf = df_settled.groupby('sport').agg(
-                Zakłady=('id', 'count'),
-                Zysk=('profit', 'sum')
-            ).reset_index()
-            st.dataframe(sport_perf, use_container_width=True)
-            
-        with col_m2:
-            st.markdown("##### Skuteczność per Typ Zakładu (H2H vs Handicap)")
-            type_perf = df_settled.groupby('bet_type').agg(
-                Zakłady=('id', 'count'),
-                Zysk=('profit', 'sum')
-            ).reset_index()
-            st.dataframe(type_perf, use_container_width=True)
-
-        st.markdown("---")
-        st.subheader("📈 Krzywa Wzrostu Kapitału (Equity Curve)")
-        
-        df_settled['cumulative_profit'] = df_settled['profit'].cumsum()
-        df_settled['Kapitał (PLN)'] = bankroll + df_settled['cumulative_profit']
-        
-        base_chart = alt.Chart(df_settled).mark_line(strokeWidth=3, color='#34d399').encode(
-            x=alt.X('date:T', title='Data rozliczenia'),
-            y=alt.Y('Kapitał (PLN):Q', title='Stan Bankrollu (PLN)', scale=alt.Scale(zero=False)),
-            tooltip=['date', 'match_name', 'profit', 'Kapitał (PLN)']
-        )
-        
-        rule = alt.Chart(pd.DataFrame({'y': [bankroll]})).mark_rule(color='red', strokeDash=[4, 4]).encode(y='y:Q')
-        
-        final_chart = (base_chart + rule).properties(height=400)
-        st.altair_chart(final_chart, use_container_width=True)
-        st.caption("ℹ️ Czerwona linia przerywana oznacza poziom kapitału początkowego (bankroll startowy). Wszystko powyżej to czysty zysk modelu.")
