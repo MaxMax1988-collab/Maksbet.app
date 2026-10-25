@@ -4,3 +4,4 @@ numpy
 requests
 psycopg2-binary
 altair
+scikit-learn
