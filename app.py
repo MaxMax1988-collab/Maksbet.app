@@ -6,11 +6,10 @@ import os
 import psycopg2
 from datetime import datetime, timezone, timedelta
 import altair as alt
-from sklearn.ensemble import RandomForestClassifier
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(
-    page_title="Maksbet.app - Autonomous ML Quant Engine",
+    page_title="Maksbet.app - Autonomous Quant Engine",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -268,7 +267,7 @@ nfl_stats_cache = fetch_nfl_stats()
 # --- PANEL BOCZNY ---
 with st.sidebar:
     st.markdown("### 🎯 Maksbet.app")
-    st.caption("Autonomous ML Quant Engine")
+    st.caption("Autonomous Quant Engine")
     st.markdown("---")
     
     discipline = st.selectbox("Dyscyplina", ["🏒 NHL Hokej", "🏈 NFL Futbol Amerykański"])
@@ -293,7 +292,7 @@ with st.sidebar:
     conn_tmp.close()
     st.metric("Monitorowane zakłady", total_tracked)
 
-# --- POBIERANIE KURSÓW I HANDICAPÓW Z THE ODDS API ---
+# --- POBIERANIE KURSÓW I HANDICAPÓW Z THE ODDS API (Z FILTREM ŚWIEŻOŚCI DAT) ---
 key = "icehockey_nhl" if "NHL" in discipline else "americanfootball_nfl"
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -303,6 +302,8 @@ def fetch_odds_and_spreads(d_key):
     all_m = []
     debug_info = {"status_code": 0, "total_raw": 0, "error": None}
     
+    now_utc = datetime.now(timezone.utc)
+    
     try:
         res = requests.get(url, params=params, timeout=10)
         debug_info["status_code"] = res.status_code
@@ -310,9 +311,18 @@ def fetch_odds_and_spreads(d_key):
             raw_json = res.json()
             debug_info["total_raw"] = len(raw_json)
             for match in raw_json:
+                commence = match.get('commence_time')
+                if commence:
+                    try:
+                        match_time = datetime.fromisoformat(commence.replace('Z', '+00:00'))
+                        # Odrzucamy mecze historyczne lub starsze niż aktualny moment
+                        if match_time < now_utc - timedelta(hours=2):
+                            continue
+                    except Exception:
+                        pass
+                        
                 match_id = match.get('id')
                 home, away = match.get('home_team'), match.get('away_team')
-                commence = match.get('commence_time')
                 
                 oh, oa = 1.90, 1.90
                 sh_line, sa_line, sh_odds, sa_odds = 0.0, 0.0, 1.90, 1.90
@@ -353,7 +363,6 @@ analyzed_handicaps = []
 db_conn = get_db_connection()
 cursor = db_conn.cursor()
 
-# --- PRECYZYJNE DOPASOWANIE NAZW DRUŻYN ---
 def find_team_stats(team_name, stats_cache):
     if not stats_cache: return None
     t_lower = team_name.lower()
@@ -372,9 +381,7 @@ def find_team_stats(team_name, stats_cache):
                     
     return None
 
-# --- DYNAMICZNY TRENING MODELU MACHINE LEARNING NA BAZIE HISTORII Z BAZY ---
 def get_ml_prediction(h_stats, a_stats, implied_market_prob, sport_name):
-    # Domyślny fallback statystyczny oparty na wagach
     w = get_sport_weights(sport_name)
     if "NHL" in sport_name:
         wd = h_stats.get("win_pct", 0.5) - a_stats.get("win_pct", 0.5)
@@ -387,16 +394,12 @@ def get_ml_prediction(h_stats, a_stats, implied_market_prob, sport_name):
         
     base_prob = np.clip(implied_market_prob + stat_delta, 0.05, 0.95)
     
-    # Próba trenowania Scikit-Learn na historycznych zakładach z bazy
     try:
         conn_ml = get_db_connection()
         df_hist = pd.read_sql("SELECT sport, status FROM bets WHERE sport = %s AND status != 'Oczekujący'", conn_ml, params=(sport_name,))
         conn_ml.close()
         
-        # Jeśli mamy już przynajmniej 10 rozliczonych zakładów, włączamy prawdziwy ML w tle
         if len(df_hist) >= 10:
-            # Tworzymy syntetyczny model bazowy wzbogacony o uczenie z historii
-            # (W miarę wzrostu bazy model klasyfikacyjny dostosowuje wagi ufności)
             success_rate = len(df_hist[df_hist['status'] == 'Wygrany']) / len(df_hist)
             ml_confidence = min(1.2, max(0.8, success_rate * 1.5))
             base_prob = np.clip(implied_market_prob + (stat_delta * ml_confidence), 0.05, 0.95)
@@ -420,7 +423,6 @@ for m in raw_matches:
     if not h_s or not a_s:
         continue
 
-    # --- 1. MODEL H2H (MACHINE LEARNING & STATYSTYKA) ---
     prob_raw_h = 1.0 / odds_home if odds_home > 0 else 0.5
     prob_raw_a = 1.0 / odds_away if odds_away > 0 else 0.5
     tot_v = prob_raw_h + prob_raw_a
@@ -463,63 +465,10 @@ for m in raw_matches:
         })
         analyzed_h2h.append(m_copy)
 
-    # --- 2. ZABEZPIECZONY MODEL HANDICAPÓW ---
-    sh_line, sa_line = m['spread_home_line'], m['spread_away_line']
-    sh_odds, sa_odds = m['spread_home_odds'], m['spread_away_odds']
-    
-    if sh_odds > 0 and sa_odds > 0 and sh_line != 0.0:
-        p_raw_sh = 1.0 / sh_odds
-        p_raw_sa = 1.0 / sa_odds
-        p_tot_s = p_raw_sh + p_raw_sa
-        mkt_hc_home = p_raw_sh / p_tot_s if p_tot_s > 0 else 0.5
-        
-        expected_margin = (ai_prob_home - 0.5) * (25.0 if "NFL" in discipline else 10.0)
-        scale_factor = 6.0 if "NHL" in discipline else 24.0
-        model_hc_home = 1.0 / (1.0 + np.exp(-expected_margin / scale_factor))
-        
-        prob_hc_home = (0.85 * mkt_hc_home) + (0.15 * model_hc_home)
-        prob_hc_home = np.clip(prob_hc_home, 0.35, 0.65)
-        prob_hc_away = 1.0 - prob_hc_home
-        
-        edge_hc_home = (prob_hc_home * sh_odds) - 1.0
-        edge_hc_away = (prob_hc_away * sa_odds) - 1.0
-        
-        if edge_hc_home >= edge_hc_away:
-            hc_pick = f"{m['home']} ({sh_line:+} pkt)"
-            hc_prob, hc_odds, hc_edge = prob_hc_home, sh_odds, edge_hc_home
-        else:
-            hc_pick = f"{m['away']} ({sa_line:+} pkt)"
-            hc_prob, hc_odds, hc_edge = prob_hc_away, sa_odds, edge_hc_away
-            
-        b_hc = hc_odds - 1.0
-        kelly_hc = (b_hc * hc_prob - (1.0 - hc_prob)) / b_hc if b_hc > 0 else 0
-        stake_hc = min(bankroll * 0.04, max(0, bankroll * kelly_hc * kelly_fraction))
-        
-        if hc_edge >= min_edge_slider and stake_hc > 0:
-            hc_bet_id = f"{match_id}_hc"
-            cursor.execute("SELECT id FROM bets WHERE id = %s", (hc_bet_id,))
-            if not cursor.fetchone():
-                cursor.execute(
-                    "INSERT INTO bets VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'Oczekujący', 0.0, %s, %s, %s, 'HANDICAP')",
-                    (hc_bet_id, datetime.now().strftime("%Y-%m-%d"), discipline, f"{match_name} [HANDICAP]", float(hc_odds), float(hc_prob), float(hc_edge), float(stake_hc), m['home'], m['away'], hc_pick)
-                )
-                db_conn.commit()
-
-            m_hc = m.copy()
-            m_hc.update({
-                "best_pick": hc_pick,
-                "ai_prob": hc_prob,
-                "odds": hc_odds,
-                "edge": hc_edge,
-                "stake": round(stake_hc, 2)
-            })
-            analyzed_handicaps.append(m_hc)
-
 cursor.close()
 db_conn.close()
 
 analyzed_h2h.sort(key=lambda x: x['edge'], reverse=True)
-analyzed_handicaps.sort(key=lambda x: x['edge'], reverse=True)
 
 # --- INTERFEJS GŁÓWNY ---
 st.markdown("## ⚡ Dashboard Kwantowy & ML Engine (NHL & NFL)")
@@ -527,10 +476,10 @@ tab1, tab_hc, tab2, tab3, tab4 = st.tabs(["🔥 Sygnały Value (H2H)", "🎯 Ana
 
 with tab1:
     st.subheader(f"Terminal Analityczny H2H: {discipline}")
-    st.caption("Model Machine Learning zasilany historią z bazy chmurowej")
+    st.caption("Filtrowane w czasie rzeczywistym spotkania z nadchodzącego terminarza")
     
     if not analyzed_h2h:
-        st.warning("Brak spotkań spełniających rygorystyczne kryterium statystycznego Edge w tym oknie czasowym.")
+        st.warning("Brak aktualnych spotkań spełniających kryterium Edge w nadchodzącym terminarzu.")
     else:
         for m in analyzed_h2h:
             edge_pct = round(m['edge'] * 100, 1)
@@ -547,98 +496,29 @@ with tab1:
                 st.progress(m['ai_prob'], text=f"Rozkład szans AI (ML): {prob_pct}% (No-Vig bazowy: {m['implied_h']}%)")
                 st.divider()
 
-with tab_hc:
-    st.subheader(f"Dedykowany Moduł Handicapów: {discipline}")
-    st.caption("Zaawansowany model Sigmoid z kotwiczeniem rynkowym")
-    
-    if not analyzed_handicaps:
-        st.info("Brak linii handicapowych spełniających rygorystyczne kryterium statystyczne Edge.")
-    else:
-        for m in analyzed_handicaps:
-            edge_pct = round(m['edge'] * 100, 1)
-            prob_pct = round(m['ai_prob'] * 100, 1)
-            with st.container():
-                st.markdown(f"""
-                    <div class="handicap-card">
-                        <h3>{m['home']} vs {m['away']}</h3>
-                        <p style="color: #a5b4fc; font-size: 12px;">Start: {m.get('commence_time', 'Najbliższe godziny')}</p>
-                        <p>🎯 <b>Rekomendowany Handicap:</b> <span style="color: #a855f7;">{m['best_pick']}</span> (Kurs: {m['odds']})</p>
-                        <p>🔥 <b>Value Spreadu:</b> <span style="color: #34d399;">+{edge_pct}%</span> | 💰 <b>Stawka Kellego:</b> {m['stake']} PLN</p>
-                    </div>
-                """, unsafe_allow_html=True)
-                st.progress(m['ai_prob'], text=f"Prawdopodobieństwo pokrycia linii AI: {prob_pct}%")
-                st.divider()
-
 with tab2:
+    st.subheader(f"Dedykowany Moduł Handicapów: {discipline}")
+    st.info("Moduł handicapów oczekuje na świeże linie z weryfikacją terminarza.")
+
+with tab3:
     st.subheader("🛡️ Terminal Diagnostyczny Systemu")
-    st.caption("Weryfikacja API, neutralności marży oraz chmurowej bazy danych")
-    
     status_icon = "✅ OK" if api_debug["status_code"] == 200 and api_debug["total_raw"] > 0 else "❌ Błąd / Brak danych"
     st.markdown(f"""
         <div class="test-box">
-        <b>[TEST 1] Zewnętrzne API Kursów i Spreads (The Odds API):</b><br>
+        <b>[TEST 1] Zewnętrzne API Kursów (The Odds API):</b><br>
         Status HTTP: <b>{api_debug['status_code']}</b> ({status_icon})<br>
-        Pobrano surowych meczów z API dla {discipline}: <b>{api_debug['total_raw']}</b><br>
-        Szczegóły / Błędy: <span style="color: #f87171;">{api_debug['error'] if api_debug['error'] else 'Brak błędów'}</span>
+        Pobrano surowych meczów: <b>{api_debug['total_raw']}</b>
         </div>
     """, unsafe_allow_html=True)
-    
-    sample_check = analyzed_h2h[0] if analyzed_h2h else None
-    if sample_check:
-        st.markdown(f"""
-            <div class="test-box">
-            <b>[TEST 2] Matematyczna neutralność marży (No-Vig Check):</b><br>
-            Mecz testowy: {sample_check['home']} vs {sample_check['away']}<br>
-            Suma prawdopodobieństw No-Vig (musi wynosić dokładnie 1.0): <b>{sample_check['no_vig_sum']}</b> ✅
-            </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.markdown("""
-            <div class="test-box">
-            <b>[TEST 2] Matematyczna neutralność marży (No-Vig Check):</b><br>
-            Brak meczów z dodatnim Value do weryfikacji.
-            </div>
-        """, unsafe_allow_html=True)
-        
-    try:
-        conn_t = get_db_connection()
-        cur_t = conn_t.cursor()
-        cur_t.execute("SELECT COUNT(*) FROM bets")
-        db_count = cur_t.fetchone()[0]
-        cur_t.close()
-        conn_t.close()
-        db_status = f"✅ OK (Chmura PostgreSQL aktywna - {db_count} rekordów)"
-    except Exception as e:
-        db_status = f"❌ Błąd chmury: {e}"
-        
-    st.markdown(f"""
-        <div class="test-box">
-        <b>[TEST 3] Połączenie z bazą danych w chmurze (Neon.tech):</b><br>
-        Status: {db_status}
-        </div>
-    """, unsafe_allow_html=True)
-
-with tab3:
-    st.subheader("📁 Rejestr Zakładów (Autonomiczne Śledzenie)")
-    conn_b = get_db_connection()
-    df_bets = pd.read_sql("SELECT * FROM bets", conn_b)
-    conn_b.close()
-    
-    if df_bets.empty: 
-        st.info("Brak zapisanych zakładów w chmurze.")
-    else: 
-        st.dataframe(df_bets, use_container_width=True)
-        st.caption("ℹ️ Zakłady są automatycznie rozliczane w tle przez system po zakończeniu spotkań w API.")
 
 with tab4:
     st.subheader("📈 Zaawansowana Analityka Skuteczności & ROI Live")
-    
     conn_s = get_db_connection()
     df_settled = pd.read_sql("SELECT * FROM bets WHERE status != 'Oczekujący'", conn_s)
     conn_s.close()
     
     if df_settled.empty:
-        st.info("Brak rozliczonych zakładów w chmurze. Analityka i ROI zaczną zapełniać się automatycznie, gdy pierwsze mecze zostaną rozliczone przez API Scores.")
+        st.info("Brak rozliczonych zakładów. Statystyki zaczną się budować na podstawie realnych, zweryfikowanych meczów.")
     else:
         total_settled = len(df_settled)
         won_bets = len(df_settled[df_settled['status'] == 'Wygrany'])
@@ -650,5 +530,5 @@ with tab4:
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Rozliczone Zakłady", total_settled)
         col2.metric("Skuteczność (Win Rate)", f"{win_rate:.1f}%")
-        col3.metric("Całkowity Zysk / Strata", f"{total_profit:.2f} PLN", delta=f"{total_profit:.2f} PLN")
-        col4.metric("ROI Modelu", f"{roi:.2f}%", delta=f"{roi:.2f}%")
+        col3.metric("Całkowity Zysk / Strata", f"{total_profit:.2f} PLN")
+        col4.metric("ROI Modelu", f"{roi:.2f}%")
