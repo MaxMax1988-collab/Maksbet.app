@@ -386,36 +386,44 @@ with tab5:
         
         with col1:
             st.markdown("#### 📌 Podział Gospodarz vs Gość")
-            df_an['is_home'] = df_an['best_pick'] == df_an['home_team']
-            split_summary = df_an.groupby('is_home').agg(
-                Zakłady=('id', 'count'),
-                Zysk=('profit', 'sum')
-            ).reset()
-            split_summary['Typ zakładu'] = split_summary['is_home'].map({True: 'Gospodarz (Home)', False: 'Gość (Away)'})
-            st.dataframe(split_summary[['Typ zakładu', 'Zakłady', 'Zysk']], use_container_width=True)
+            try:
+                df_an['is_home'] = df_an['best_pick'] == df_an['home_team']
+                split_summary = df_an.groupby('is_home', observed=False).agg(
+                    Zakłady=('id', 'count'),
+                    Zysk=('profit', 'sum')
+                ).reset_index()
+                split_summary['Typ zakładu'] = split_summary['is_home'].map({True: 'Gospodarz (Home)', False: 'Gość (Away)'})
+                st.dataframe(split_summary[['Typ zakładu', 'Zakłady', 'Zysk']], use_container_width=True)
+            except Exception as e:
+                st.info("Za mało danych do podziału Gospodarz/Gość.")
 
         with col2:
             st.markdown("#### 🎯 Skuteczność wg Przedziałów Kursów")
-            bins = [1.0, 1.5, 2.0, 3.0, 10.0]
-            labels = ['1.00 - 1.50', '1.51 - 2.00', '2.01 - 3.00', '3.00+']
-            df_an['odds_bin'] = pd.cut(df_an['odds'], bins=bins, labels=labels, right=False)
-            odds_summary = df_an.groupby('odds_bin', observed=False).agg(
-                Zakłady=('id', 'count'),
-                Zysk=('profit', 'sum')
-            ).reset()
-            st.dataframe(odds_summary, use_container_width=True)
+            try:
+                bins = [1.0, 1.5, 2.0, 3.0, 10.0]
+                labels = ['1.00 - 1.50', '1.51 - 2.00', '2.01 - 3.00', '3.00+']
+                df_an['odds_bin'] = pd.cut(df_an['odds'], bins=bins, labels=labels, right=False)
+                odds_summary = df_an.groupby('odds_bin', observed=False).agg(
+                    Zakłady=('id', 'count'),
+                    Zysk=('profit', 'sum')
+                ).reset_index()
+                st.dataframe(odds_summary, use_container_width=True)
+            except Exception as e:
+                st.info("Za mało danych do przedziałów kursów.")
             
         st.markdown("---")
         st.markdown("#### 📉 Reliability Diagram (Kalibracja Modelu AI)")
         st.caption("Porównanie pewności modelu z rzeczywistymi trafiami w przedziałach prawdopodobieństwa")
         
-        prob_bins = [0.0, 0.5, 0.6, 0.7, 0.8, 1.0]
-        prob_labels = ['< 50%', '50-60%', '60-70%', '70-80%', '80%+']
-        df_an['prob_bin'] = pd.cut(df_an['ai_prob'], bins=prob_bins, labels=prob_labels, right=False)
-        calib = df_an.groupby('prob_bin', observed=False).agg(
-            Wszystkie=('id', 'count'),
-            Trafione=('status', lambda x: (x == 'Wygrany').sum())
-        ).reset()
-        calib['Rzeczywista Skuteczność'] = np.where(calib['Wszystkie'] > 0, (calib['Trafione'] / calib['Wszystkie'] * 100).round(1), 0)
-        st.dataframe(calib, use_container_width=True)
-    
+        try:
+            prob_bins = [0.0, 0.5, 0.6, 0.7, 0.8, 1.0]
+            prob_labels = ['< 50%', '50-60%', '60-70%', '70-80%', '80%+']
+            df_an['prob_bin'] = pd.cut(df_an['ai_prob'], bins=prob_bins, labels=prob_labels, right=False)
+            calib = df_an.groupby('prob_bin', observed=False).agg(
+                Wszystkie=('id', 'count'),
+                Trafione=('status', lambda x: (x == 'Wygrany').sum())
+            ).reset_index()
+            calib['Rzeczywista Skuteczność'] = np.where(calib['Wszystkie'] > 0, (calib['Trafione'] / calib['Wszystkie'] * 100).round(1), 0)
+            st.dataframe(calib, use_container_width=True)
+        except Exception as e:
+            st.info("Brak wystarczających danych do kalibracji.")
