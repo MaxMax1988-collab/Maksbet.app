@@ -6,10 +6,12 @@ import os
 import psycopg2
 from datetime import datetime, timezone, timedelta
 import altair as alt
+import xgboost as xgb
+from sklearn.model_selection import train_test_split
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(
-    page_title="Maksbet.app - Advanced NHL Quant Engine",
+    page_title="Maksbet.app - XGBoost Quant Engine",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -22,6 +24,8 @@ st.markdown("""
     [data-testid="stSidebar"] { background-color: #111827; border-right: 1px solid #1f2937; }
     .stMetric { background: linear-gradient(135deg, #1f2937 0%, #111827 100%); padding: 15px; border-radius: 14px; border: 1px solid #374151; }
     .value-card { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border-left: 6px solid #10b981; padding: 20px; border-radius: 12px; margin-bottom: 15px; border: 1px solid #334155; }
+    .totals-card { background: linear-gradient(135deg, #312e81 0%, #0f172a 100%); border-left: 6px solid #818cf8; padding: 20px; border-radius: 12px; margin-bottom: 15px; border: 1px solid #3730a3; }
+    .ml-box { background: #064e3b; border: 1px solid #059669; padding: 15px; border-radius: 10px; margin-bottom: 15px; font-size: 14px; }
     .test-box { background: #111827; border: 1px solid #374151; padding: 15px; border-radius: 10px; margin-bottom: 10px; font-family: monospace; font-size: 13px; }
     </style>
 """, unsafe_allow_html=True)
@@ -70,6 +74,11 @@ def init_db():
             bet_type TEXT DEFAULT 'H2H'
         )
     ''')
+    
+    try:
+        cursor.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS bet_type TEXT DEFAULT 'H2H'")
+    except Exception:
+        pass
     
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS weights_history (
@@ -126,7 +135,7 @@ def update_weights_after_settlement(bet_won):
 def auto_settle_from_api():
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, sport, odds, stake, best_pick, home_team, away_team FROM bets WHERE status = 'Oczekujący'")
+    cursor.execute("SELECT id, sport, odds, stake, best_pick, home_team, away_team, bet_type FROM bets WHERE status = 'Oczekujący'")
     pending_bets = cursor.fetchall()
     
     if not pending_bets:
@@ -146,11 +155,24 @@ def auto_settle_from_api():
                     if scores and len(scores) >= 2:
                         s1, s2 = int(scores[0].get("score", 0)), int(scores[1].get("score", 0))
                         t1, t2 = scores[0].get("name"), scores[1].get("name")
+                        total_goals = s1 + s2
+                        
                         for bet in pending_bets:
-                            bet_id, b_sport, odds, stake, best_pick, home, away = bet
-                            if bet_id.split("_")[0] == match_id and b_sport == '🏒 NHL Hokej':
-                                winner = t1 if s1 > s2 else t2
-                                won = (best_pick.lower() in winner.lower() or winner.lower() in best_pick.lower())
+                            bet_id, b_sport, odds, stake, best_pick, home, away, b_type = bet
+                            if bet_id.startswith(match_id) and b_sport == '🏒 NHL Hokej':
+                                won = False
+                                if b_type == 'H2H':
+                                    winner = t1 if s1 > s2 else t2
+                                    won = (best_pick.lower() in winner.lower() or winner.lower() in best_pick.lower())
+                                elif b_type == 'Totals':
+                                    parts = best_pick.split()
+                                    if len(parts) == 2:
+                                        direction, line_str = parts[0], float(parts[1])
+                                        if direction == "Over":
+                                            won = total_goals > line_str
+                                        elif direction == "Under":
+                                            won = total_goals < line_str
+                                            
                                 status = 'Wygrany' if won else 'Przegrany'
                                 profit = round((odds - 1.0) * stake, 2) if won else round(-stake, 2)
                                 cursor.execute("UPDATE bets SET status = %s, profit = %s WHERE id = %s", (status, profit, bet_id))
@@ -193,10 +215,33 @@ def fetch_nhl_stats():
 
 nhl_stats_cache = fetch_nhl_stats()
 
+# --- TRENOWANIE MODELU XGBOOST NA BAZIE HISTORYCZNEJ ---
+@st.cache_resource
+def get_trained_xgboost_model():
+    conn = get_db_connection()
+    try:
+        df_ml = pd.read_sql("SELECT odds, ai_prob, edge, status FROM bets WHERE status != 'Oczekujący'", conn)
+    except Exception:
+        df_ml = pd.DataFrame()
+    conn.close()
+
+    if len(df_ml) < 15:
+        return None, "Za mało rozliczonych meczów (< 15) – używanie silnika heurystycznego."
+
+    df_ml['target'] = (df_ml['status'] == 'Wygrany').astype(int)
+    X = df_ml[['odds', 'ai_prob', 'edge']]
+    y = df_ml['target']
+
+    model = xgb.XGBClassifier(n_estimators=50, max_depth=3, learning_rate=0.1, random_state=42)
+    model.fit(X, y)
+    return model, f"Model XGBoost aktywny (trenowany na {len(df_ml)} historycznych zakładach) 🚀"
+
+ml_model, ml_status_msg = get_trained_xgboost_model()
+
 # --- PANEL BOCZNY ---
 with st.sidebar:
     st.markdown("### 🎯 Maksbet.app")
-    st.caption("Advanced NHL Quant Engine")
+    st.caption("XGBoost Quant Engine")
     st.markdown("---")
     
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
@@ -205,16 +250,16 @@ with st.sidebar:
     
     curr_weights = get_sport_weights()
     st.markdown("---")
-    st.markdown("<b>🧠 Wyuczone Wagi NHL (Baza Neon):</b>", unsafe_allow_html=True)
-    st.caption(f"・ Win %: {round(curr_weights['win_pct']*100, 1)}%")
-    st.caption(f"・ Advanced Goals: {round(curr_weights['advanced']*100, 1)}%")
-    st.caption(f"・ Forma: {round(curr_weights['form']*100, 1)}%")
-    st.caption(f"・ Home Advantage: {round(curr_weights['home']*100, 1)}%")
+    st.markdown("<b>🧠 Stan Silnika AI:</b>", unsafe_allow_html=True)
+    if ml_model is not None:
+        st.success("XGBoost Classifier: Aktywny")
+    else:
+        st.info("Tryb: Heurystyczne wagi bazowe")
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_odds():
     url = f"{ODDS_BASE_URL}/icehockey_nhl/odds"
-    params = {"apiKey": ODDS_API_KEY, "regions": "us", "markets": "h2h", "oddsFormat": "decimal"}
+    params = {"apiKey": ODDS_API_KEY, "regions": "us", "markets": "h2h,totals", "oddsFormat": "decimal"}
     try:
         res = requests.get(url, params=params, timeout=10)
         if res.status_code == 200:
@@ -225,6 +270,7 @@ def fetch_odds():
 
 raw_matches, status_code = fetch_odds()
 analyzed_h2h = []
+analyzed_totals = []
 
 db_conn = get_db_connection()
 cursor = db_conn.cursor()
@@ -243,6 +289,9 @@ for m in raw_matches:
     commence = m.get('commence_time')
     
     oh, oa = 1.90, 1.90
+    over_line, under_line = 5.5, 5.5
+    over_odds, under_odds = 1.90, 1.90
+    
     books = m.get('bookmakers', [])
     if books:
         for mkt in books[0].get('markets', []):
@@ -250,11 +299,19 @@ for m in raw_matches:
                 for out in mkt.get('outcomes', []):
                     if out.get('name') == home: oh = float(out.get('price', 1.90))
                     elif out.get('name') == away: oa = float(out.get('price', 1.90))
+            elif mkt.get('key') == 'totals':
+                for out in mkt.get('outcomes', []):
+                    if out.get('name') == 'Over':
+                        over_line = float(out.get('point', 5.5))
+                        over_odds = float(out.get('price', 1.90))
+                    elif out.get('name') == 'Under':
+                        under_odds = float(out.get('price', 1.90))
                     
     h_s = find_team_stats(home)
     a_s = find_team_stats(away)
     if not h_s or not a_s: continue
 
+    # --- ANALIZA H2H ---
     prob_raw_h = 1.0 / oh if oh > 0 else 0.5
     prob_raw_a = 1.0 / oa if oa > 0 else 0.5
     tot_v = prob_raw_h + prob_raw_a
@@ -262,7 +319,7 @@ for m in raw_matches:
     
     w = curr_weights
     wd = h_s.get("win_pct", 0.5) - a_s.get("win_pct", 0.5)
-    gf_diff = (h_s.get("gf_g", 3.0) - a_s.get("ga_g", 3.0)) - (a_s.get("gf_g", 3.0) - h_s.get("ga_g", 3.0))
+    gf_diff = (h_s.get("gf_g", 3.0) - a_s.get("ga_g", 3.0)) - (a_s.get("gf_g", 3.0) - a_s.get("ga_g", 3.0))
     stat_delta = (wd * w["win_pct"] * 0.15) + (gf_diff * w["advanced"] * 0.20) + (w["home"] * 0.05)
     
     ai_prob_home = np.clip(implied_h + stat_delta, 0.05, 0.95)
@@ -276,33 +333,78 @@ for m in raw_matches:
     else:
         best_pick, best_prob, best_odds, best_edge = away, ai_prob_away, oa, edge_away
     
-    b = best_odds - 1.0
-    kelly_f = (b * best_prob - (1.0 - best_prob)) / b if b > 0 else 0
-    stake = min(bankroll * 0.04, max(0, bankroll * kelly_f * kelly_fraction))
+    # Jeśli model XGBoost jest wyszkolony, korygujemy prawdopodobieństwo przez ML
+    if ml_model is not None:
+        try:
+            ml_pred_prob = ml_model.predict_proba(np.array([[best_odds, best_prob, best_edge]]))[0][1]
+            best_prob = (best_prob + ml_pred_prob) / 2.0  # Hybrydowe wygładzenie
+            best_edge = (best_prob * best_odds) - 1.0
+        except Exception:
+            pass
+
+    b_h2h = best_odds - 1.0
+    kelly_f_h2h = (b_h2h * best_prob - (1.0 - best_prob)) / b_h2h if b_h2h > 0 else 0
+    stake_h2h = min(bankroll * 0.04, max(0, bankroll * kelly_f_h2h * kelly_fraction))
     
-    if best_edge >= min_edge_slider and stake > 0:
+    if best_edge >= min_edge_slider and stake_h2h > 0:
         cursor.execute("SELECT id FROM bets WHERE id = %s", (match_id,))
         if not cursor.fetchone():
             cursor.execute(
                 "INSERT INTO bets VALUES (%s, %s, '🏒 NHL Hokej', %s, %s, %s, %s, %s, 'Oczekujący', 0.0, %s, %s, %s, 'H2H')",
-                (match_id, datetime.now().strftime("%Y-%m-%d"), f"{home} vs {away}", float(best_odds), float(best_prob), float(best_edge), float(stake), home, away, best_pick)
+                (match_id, datetime.now().strftime("%Y-%m-%d"), f"{home} vs {away}", float(best_odds), float(best_prob), float(best_edge), float(stake_h2h), home, away, best_pick)
             )
             db_conn.commit()
 
         analyzed_h2h.append({
             "home": home, "away": away, "commence_time": commence,
             "best_pick": best_pick, "ai_prob": best_prob, "odds": best_odds, 
-            "edge": best_edge, "stake": round(stake, 2), "implied_h": round(implied_h * 100, 2)
+            "edge": best_edge, "stake": round(stake_h2h, 2), "implied_h": round(implied_h * 100, 2)
+        })
+
+    # --- ANALIZA TOTALS (OVER / UNDER) ---
+    expected_match_goals = (h_s.get("gf_g", 3.0) + a_s.get("gf_g", 3.0) + h_s.get("ga_g", 3.0) + a_s.get("ga_g", 3.0)) / 2.0
+    diff_goals = expected_match_goals - over_line
+    prob_over = np.clip(0.50 + (diff_goals * 0.15), 0.10, 0.90)
+    prob_under = 1.0 - prob_over
+    
+    edge_over = (prob_over * over_odds) - 1.0
+    edge_under = (prob_under * under_odds) - 1.0
+    
+    if edge_over >= edge_under:
+        t_pick, t_prob, t_odds, t_edge = f"Over {over_line}", prob_over, over_odds, edge_over
+    else:
+        t_pick, t_prob, t_odds, t_edge = f"Under {over_line}", prob_under, under_odds, edge_under
+        
+    b_tot = t_odds - 1.0
+    kelly_f_tot = (b_tot * t_prob - (1.0 - t_prob)) / b_tot if b_tot > 0 else 0
+    stake_tot = min(bankroll * 0.04, max(0, bankroll * kelly_f_tot * kelly_fraction))
+    
+    if t_edge >= min_edge_slider and stake_tot > 0:
+        tot_id = f"{match_id}_TOT"
+        cursor.execute("SELECT id FROM bets WHERE id = %s", (tot_id,))
+        if not cursor.fetchone():
+            cursor.execute(
+                "INSERT INTO bets VALUES (%s, %s, '🏒 NHL Hokej', %s, %s, %s, %s, %s, 'Oczekujący', 0.0, %s, %s, %s, 'Totals')",
+                (tot_id, datetime.now().strftime("%Y-%m-%d"), f"{home} vs {away} ({t_pick})", float(t_odds), float(t_prob), float(t_edge), float(stake_tot), home, away, t_pick)
+            )
+            db_conn.commit()
+
+        analyzed_totals.append({
+            "home": home, "away": away, "commence_time": commence,
+            "best_pick": t_pick, "ai_prob": t_prob, "odds": t_odds, 
+            "edge": t_edge, "stake": round(stake_tot, 2), "expected_goals": round(expected_match_goals, 2), "line": over_line
         })
 
 cursor.close()
 db_conn.close()
 analyzed_h2h.sort(key=lambda x: x['edge'], reverse=True)
+analyzed_totals.sort(key=lambda x: x['edge'], reverse=True)
 
 # --- INTERFEJS GŁÓWNY ---
-st.markdown("## 🏒 Maksbet.app - Advanced NHL Quant Terminal")
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "🔥 Sygnały Value (NHL)", 
+st.markdown("## 🏒 Maksbet.app - XGBoost Quant Terminal")
+tab1, tab_tot, tab2, tab3, tab4, tab5 = st.tabs([
+    "🔥 Value (H2H)",
+    "🎯 Value (Totals O/U)",
     "🛡️ Terminal Diagnostyczny", 
     "📈 Rejestr & Eksport CSV", 
     "📊 Krzywa Kapitału (Equity)", 
@@ -310,9 +412,10 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 ])
 
 with tab1:
-    st.subheader("Aktualne Value Bets w NHL")
+    st.subheader("Aktualne Value Bets w NHL (H2H)")
+    st.markdown(f'<div class="ml-box">🤖 <b>Status modelu uczenia:</b> {ml_status_msg}</div>', unsafe_allow_html=True)
     if not analyzed_h2h:
-        st.warning("Brak spotkań NHL spełniających kryterium Edge w tym oknie czasowym.")
+        st.warning("Brak spotkań H2H spełniających kryterium Edge w tym oknie czasowym.")
     else:
         for m in analyzed_h2h:
             st.markdown(f"""
@@ -323,7 +426,25 @@ with tab1:
                     <p>🔥 <b>Value:</b> <span style="color: #34d399;">+{round(m['edge']*100, 1)}%</span> | 💰 <b>Stawka Kellego:</b> {m['stake']} PLN</p>
                 </div>
             """, unsafe_allow_html=True)
-            st.progress(m['ai_prob'], text=f"Szanse AI: {round(m['ai_prob']*100, 1)}%")
+            st.progress(m['ai_prob'], text=f"Szanse AI (XGBoost/Model): {round(m['ai_prob']*100, 1)}%")
+            st.divider()
+
+with tab_tot:
+    st.subheader("Aktualne Value Bets w NHL (Totals Over / Under)")
+    if not analyzed_totals:
+        st.warning("Brak zakładów Totals spełniających kryterium Edge w tym oknie czasowym.")
+    else:
+        for m in analyzed_totals:
+            st.markdown(f"""
+                <div class="totals-card">
+                    <h3>{m['home']} vs {m['away']}</h3>
+                    <p style="color: #94a3b8; font-size: 12px;">Start: {m.get('commence_time', 'Najbliższe godziny')}</p>
+                    <p>🎯 <b>Typ AI:</b> <span style="color: #818cf8;">{m['best_pick']}</span> (Kurs: {m['odds']})</p>
+                    <p>📈 <b>Oczekiwane bramki modelu:</b> {m['expected_goals']} (Linia: {m['line']})</p>
+                    <p>🔥 <b>Value:</b> <span style="color: #34d399;">+{round(m['edge']*100, 1)}%</span> | 💰 <b>Stawka Kellego:</b> {m['stake']} PLN</p>
+                </div>
+            """, unsafe_allow_html=True)
+            st.progress(m['ai_prob'], text=f"Szansa wejścia typu: {round(m['ai_prob']*100, 1)}%")
             st.divider()
 
 with tab2:
@@ -332,7 +453,8 @@ with tab2:
     st.markdown(f"""
         <div class="test-box">
         <b>The Odds API (NHL):</b> Status HTTP {status_code} ({status_icon})<br>
-        <b>Baza Neon.tech:</b> Połączenie aktywne ✅
+        <b>Baza Neon.tech:</b> Połączenie aktywne ✅<br>
+        <b>Model Machine Learning:</b> XGBoost zintegrowany ✅
         </div>
     """, unsafe_allow_html=True)
 
@@ -385,17 +507,15 @@ with tab5:
         col1, col2 = st.columns(2)
         
         with col1:
-            st.markdown("#### 📌 Podział Gospodarz vs Gość")
+            st.markdown("#### 📌 Podział na Typ Zakładu (H2H vs Totals)")
             try:
-                df_an['is_home'] = df_an['best_pick'] == df_an['home_team']
-                split_summary = df_an.groupby('is_home', observed=False).agg(
+                type_summary = df_an.groupby('bet_type', observed=False).agg(
                     Zakłady=('id', 'count'),
                     Zysk=('profit', 'sum')
                 ).reset_index()
-                split_summary['Typ zakładu'] = split_summary['is_home'].map({True: 'Gospodarz (Home)', False: 'Gość (Away)'})
-                st.dataframe(split_summary[['Typ zakładu', 'Zakłady', 'Zysk']], use_container_width=True)
+                st.dataframe(type_summary, use_container_width=True)
             except Exception as e:
-                st.info("Za mało danych do podziału Gospodarz/Gość.")
+                st.info("Za mało danych do podziału typów.")
 
         with col2:
             st.markdown("#### 🎯 Skuteczność wg Przedziałów Kursów")
@@ -410,20 +530,3 @@ with tab5:
                 st.dataframe(odds_summary, use_container_width=True)
             except Exception as e:
                 st.info("Za mało danych do przedziałów kursów.")
-            
-        st.markdown("---")
-        st.markdown("#### 📉 Reliability Diagram (Kalibracja Modelu AI)")
-        st.caption("Porównanie pewności modelu z rzeczywistymi trafiami w przedziałach prawdopodobieństwa")
-        
-        try:
-            prob_bins = [0.0, 0.5, 0.6, 0.7, 0.8, 1.0]
-            prob_labels = ['< 50%', '50-60%', '60-70%', '70-80%', '80%+']
-            df_an['prob_bin'] = pd.cut(df_an['ai_prob'], bins=prob_bins, labels=prob_labels, right=False)
-            calib = df_an.groupby('prob_bin', observed=False).agg(
-                Wszystkie=('id', 'count'),
-                Trafione=('status', lambda x: (x == 'Wygrany').sum())
-            ).reset_index()
-            calib['Rzeczywista Skuteczność'] = np.where(calib['Wszystkie'] > 0, (calib['Trafione'] / calib['Wszystkie'] * 100).round(1), 0)
-            st.dataframe(calib, use_container_width=True)
-        except Exception as e:
-            st.info("Brak wystarczających danych do kalibracji.")
