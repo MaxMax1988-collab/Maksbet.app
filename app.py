@@ -256,7 +256,6 @@ def get_banned_odds_bins():
             total_profit=('profit', 'sum')
         )
         
-        # Zwracamy przedziały, które mają przynajmniej 15 zakładów i są na minusie
         banned = bin_stats[(bin_stats['count'] >= 15) & (bin_stats['total_profit'] < 0)].index.tolist()
         return [str(b) for b in banned]
     except Exception:
@@ -318,6 +317,7 @@ def fetch_odds():
 raw_matches, status_code = fetch_odds()
 analyzed_h2h = []
 analyzed_totals = []
+skipped_h2h_count = 0  # Licznik odrzuconych typów H2H przez bezpiecznik
 
 db_conn = get_db_connection()
 cursor = db_conn.cursor()
@@ -380,7 +380,6 @@ for m in raw_matches:
     else:
         best_pick, best_prob, best_odds, best_edge = away, ai_prob_away, oa, edge_away
     
-    # Korygowanie prawdopodobieństwa przez XGBoost jeśli aktywny
     if ml_model is not None:
         try:
             ml_pred_prob = ml_model.predict_proba(np.array([[best_odds, best_prob, best_edge]]))[0][1]
@@ -393,7 +392,6 @@ for m in raw_matches:
     kelly_f_h2h = (b_h2h * best_prob - (1.0 - best_prob)) / b_h2h if b_h2h > 0 else 0
     stake_h2h = min(bankroll * 0.04, max(0, bankroll * kelly_f_h2h * kelly_fraction))
     
-    # SPRAWDZENIE WARUNKÓW KWALIFIKACYJNYCH (EDGE + AUTOMATYCZNY BEZPIECZNIK BINÓW)
     if best_edge >= min_edge_slider and stake_h2h > 0:
         if not is_odds_banned(best_odds, banned_bins):
             cursor.execute("SELECT id FROM bets WHERE id = %s", (match_id,))
@@ -409,6 +407,8 @@ for m in raw_matches:
                 "best_pick": best_pick, "ai_prob": best_prob, "odds": best_odds, 
                 "edge": best_edge, "stake": round(stake_h2h, 2), "implied_h": round(implied_h * 100, 2)
             })
+        else:
+            skipped_h2h_count += 1
 
     # --- ANALIZA TOTALS (OVER / UNDER) ---
     expected_match_goals = (h_s.get("gf_g", 3.0) + a_s.get("gf_g", 3.0) + h_s.get("ga_g", 3.0) + a_s.get("ga_g", 3.0)) / 2.0
@@ -464,8 +464,12 @@ tab1, tab_tot, tab2, tab3, tab4, tab5 = st.tabs([
 with tab1:
     st.subheader("Aktualne Value Bets w NHL (H2H)")
     st.markdown(f'<div class="ml-box">🤖 <b>Status modelu uczenia:</b> {ml_status_msg}</div>', unsafe_allow_html=True)
+    
+    if skipped_h2h_count > 0:
+        st.info(f"🛡️ **Automatyczny bezpiecznik:** W dzisiejszej ofercie pominięto **{skipped_h2h_count}** spotkań H2H, ponieważ ich kursy wpadały w zablokowane, historycznie stratne przedziały.")
+
     if not analyzed_h2h:
-        st.warning("Brak spotkań H2H spełniających kryterium Edge w tym oknie czasowym.")
+        st.warning("Brak spotkań H2H spełniających kryterium Edge w tym oknie czasowym (lub wszystkie zostały przefiltrowane przez bezpiecznik).")
     else:
         for m in analyzed_h2h:
             st.markdown(f"""
@@ -535,7 +539,6 @@ with tab4:
     if df_eq.empty:
         st.info("Brak rozliczonych zakładów do wygenerowania krzywej kapitału.")
     else:
-        # Obliczenia Metryk ROI
         total_profit = df_eq['profit'].sum()
         total_staked = df_eq['stake'].sum()
         roi_val = (total_profit / total_staked * 100) if total_staked > 0 else 0.0
