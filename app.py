@@ -238,6 +238,49 @@ def get_trained_xgboost_model():
 
 ml_model, ml_status_msg = get_trained_xgboost_model()
 
+# --- DYNAMIK FILTRU PRZEDZIAŁÓW (AUTOMATYCZNY BEZPIECZNIK ROI) ---
+def get_banned_odds_bins():
+    conn = get_db_connection()
+    try:
+        df_history = pd.read_sql("SELECT odds, profit FROM bets WHERE status != 'Oczekujący'", conn)
+        conn.close()
+        if len(df_history) < 15:
+            return []
+        
+        bins = [1.0, 1.5, 2.0, 3.0, 10.0]
+        labels = ['1.00 - 1.50', '1.51 - 2.00', '2.01 - 3.00', '3.00+']
+        df_history['odds_bin'] = pd.cut(df_history['odds'], bins=bins, labels=labels, right=False)
+        
+        bin_stats = df_history.groupby('odds_bin', observed=False).agg(
+            count=('profit', 'count'),
+            total_profit=('profit', 'sum')
+        )
+        
+        # Zwracamy przedziały, które mają przynajmniej 15 zakładów i są na minusie
+        banned = bin_stats[(bin_stats['count'] >= 15) & (bin_stats['total_profit'] < 0)].index.tolist()
+        return [str(b) for b in banned]
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return []
+
+banned_bins = get_banned_odds_bins()
+
+def is_odds_banned(odds, banned_list):
+    if not banned_list:
+        return False
+    if 1.00 <= odds < 1.50 and '1.00 - 1.50' in banned_list:
+        return True
+    if 1.51 <= odds < 2.00 and '1.51 - 2.00' in banned_list:
+        return True
+    if 2.01 <= odds < 3.00 and '2.01 - 3.00' in banned_list:
+        return True
+    if odds >= 3.00 and '3.00+' in banned_list:
+        return True
+    return False
+
 # --- PANEL BOCZNY ---
 with st.sidebar:
     st.markdown("### 🎯 Maksbet.app")
@@ -255,6 +298,10 @@ with st.sidebar:
         st.success("XGBoost Classifier: Aktywny")
     else:
         st.info("Tryb: Heurystyczne wagi bazowe")
+        
+    if banned_bins:
+        st.markdown("---")
+        st.warning(f"🛡️ **Automatyczny Bezpiecznik:** Wyciszono stratny przedział: {', '.join(banned_bins)}")
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_odds():
@@ -333,11 +380,11 @@ for m in raw_matches:
     else:
         best_pick, best_prob, best_odds, best_edge = away, ai_prob_away, oa, edge_away
     
-    # Jeśli model XGBoost jest wyszkolony, korygujemy prawdopodobieństwo przez ML
+    # Korygowanie prawdopodobieństwa przez XGBoost jeśli aktywny
     if ml_model is not None:
         try:
             ml_pred_prob = ml_model.predict_proba(np.array([[best_odds, best_prob, best_edge]]))[0][1]
-            best_prob = (best_prob + ml_pred_prob) / 2.0  # Hybrydowe wygładzenie
+            best_prob = (best_prob + ml_pred_prob) / 2.0
             best_edge = (best_prob * best_odds) - 1.0
         except Exception:
             pass
@@ -346,20 +393,22 @@ for m in raw_matches:
     kelly_f_h2h = (b_h2h * best_prob - (1.0 - best_prob)) / b_h2h if b_h2h > 0 else 0
     stake_h2h = min(bankroll * 0.04, max(0, bankroll * kelly_f_h2h * kelly_fraction))
     
+    # SPRAWDZENIE WARUNKÓW KWALIFIKACYJNYCH (EDGE + AUTOMATYCZNY BEZPIECZNIK BINÓW)
     if best_edge >= min_edge_slider and stake_h2h > 0:
-        cursor.execute("SELECT id FROM bets WHERE id = %s", (match_id,))
-        if not cursor.fetchone():
-            cursor.execute(
-                "INSERT INTO bets VALUES (%s, %s, '🏒 NHL Hokej', %s, %s, %s, %s, %s, 'Oczekujący', 0.0, %s, %s, %s, 'H2H')",
-                (match_id, datetime.now().strftime("%Y-%m-%d"), f"{home} vs {away}", float(best_odds), float(best_prob), float(best_edge), float(stake_h2h), home, away, best_pick)
-            )
-            db_conn.commit()
+        if not is_odds_banned(best_odds, banned_bins):
+            cursor.execute("SELECT id FROM bets WHERE id = %s", (match_id,))
+            if not cursor.fetchone():
+                cursor.execute(
+                    "INSERT INTO bets VALUES (%s, %s, '🏒 NHL Hokej', %s, %s, %s, %s, %s, 'Oczekujący', 0.0, %s, %s, %s, 'H2H')",
+                    (match_id, datetime.now().strftime("%Y-%m-%d"), f"{home} vs {away}", float(best_odds), float(best_prob), float(best_edge), float(stake_h2h), home, away, best_pick)
+                )
+                db_conn.commit()
 
-        analyzed_h2h.append({
-            "home": home, "away": away, "commence_time": commence,
-            "best_pick": best_pick, "ai_prob": best_prob, "odds": best_odds, 
-            "edge": best_edge, "stake": round(stake_h2h, 2), "implied_h": round(implied_h * 100, 2)
-        })
+            analyzed_h2h.append({
+                "home": home, "away": away, "commence_time": commence,
+                "best_pick": best_pick, "ai_prob": best_prob, "odds": best_odds, 
+                "edge": best_edge, "stake": round(stake_h2h, 2), "implied_h": round(implied_h * 100, 2)
+            })
 
     # --- ANALIZA TOTALS (OVER / UNDER) ---
     expected_match_goals = (h_s.get("gf_g", 3.0) + a_s.get("gf_g", 3.0) + h_s.get("ga_g", 3.0) + a_s.get("ga_g", 3.0)) / 2.0
@@ -380,20 +429,21 @@ for m in raw_matches:
     stake_tot = min(bankroll * 0.04, max(0, bankroll * kelly_f_tot * kelly_fraction))
     
     if t_edge >= min_edge_slider and stake_tot > 0:
-        tot_id = f"{match_id}_TOT"
-        cursor.execute("SELECT id FROM bets WHERE id = %s", (tot_id,))
-        if not cursor.fetchone():
-            cursor.execute(
-                "INSERT INTO bets VALUES (%s, %s, '🏒 NHL Hokej', %s, %s, %s, %s, %s, 'Oczekujący', 0.0, %s, %s, %s, 'Totals')",
-                (tot_id, datetime.now().strftime("%Y-%m-%d"), f"{home} vs {away} ({t_pick})", float(t_odds), float(t_prob), float(t_edge), float(stake_tot), home, away, t_pick)
-            )
-            db_conn.commit()
+        if not is_odds_banned(t_odds, banned_bins):
+            tot_id = f"{match_id}_TOT"
+            cursor.execute("SELECT id FROM bets WHERE id = %s", (tot_id,))
+            if not cursor.fetchone():
+                cursor.execute(
+                    "INSERT INTO bets VALUES (%s, %s, '🏒 NHL Hokej', %s, %s, %s, %s, %s, 'Oczekujący', 0.0, %s, %s, %s, 'Totals')",
+                    (tot_id, datetime.now().strftime("%Y-%m-%d"), f"{home} vs {away} ({t_pick})", float(t_odds), float(t_prob), float(t_edge), float(stake_tot), home, away, t_pick)
+                )
+                db_conn.commit()
 
-        analyzed_totals.append({
-            "home": home, "away": away, "commence_time": commence,
-            "best_pick": t_pick, "ai_prob": t_prob, "odds": t_odds, 
-            "edge": t_edge, "stake": round(stake_tot, 2), "expected_goals": round(expected_match_goals, 2), "line": over_line
-        })
+            analyzed_totals.append({
+                "home": home, "away": away, "commence_time": commence,
+                "best_pick": t_pick, "ai_prob": t_prob, "odds": t_odds, 
+                "edge": t_edge, "stake": round(stake_tot, 2), "expected_goals": round(expected_match_goals, 2), "line": over_line
+            })
 
 cursor.close()
 db_conn.close()
@@ -479,12 +529,27 @@ with tab3:
 with tab4:
     st.subheader("📊 Krzywa Kapitału na żywo (Equity Curve)")
     conn_eq = get_db_connection()
-    df_eq = pd.read_sql("SELECT date, profit, status FROM bets WHERE status != 'Oczekujący' ORDER BY date ASC", conn_eq)
+    df_eq = pd.read_sql("SELECT date, profit, stake, status FROM bets WHERE status != 'Oczekujący' ORDER BY date ASC", conn_eq)
     conn_eq.close()
     
     if df_eq.empty:
         st.info("Brak rozliczonych zakładów do wygenerowania krzywej kapitału.")
     else:
+        # Obliczenia Metryk ROI
+        total_profit = df_eq['profit'].sum()
+        total_staked = df_eq['stake'].sum()
+        roi_val = (total_profit / total_staked * 100) if total_staked > 0 else 0.0
+        win_count = (df_eq['status'] == 'Wygrany').sum()
+        total_count = len(df_eq)
+        win_rate = (win_count / total_count * 100) if total_count > 0 else 0.0
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Łączny Zysk (PLN)", f"{round(total_profit, 2)} PLN", delta=f"{round(total_profit, 2)} PLN")
+        m2.metric("Wskaźnik ROI (%)", f"{round(roi_val, 2)}%", delta=f"{round(roi_val, 2)}%")
+        m3.metric("Skuteczność (Win Rate)", f"{round(win_rate, 1)}%", f"{win_count}/{total_count}")
+        m4.metric("Suma Stawiona", f"{round(total_staked, 2)} PLN")
+
+        st.markdown("---")
         df_eq['cumulative_profit'] = df_eq['profit'].cumsum() + bankroll
         df_eq['index'] = range(1, len(df_eq) + 1)
         
@@ -514,7 +579,7 @@ with tab5:
                     Zysk=('profit', 'sum')
                 ).reset_index()
                 st.dataframe(type_summary, use_container_width=True)
-            except Exception as e:
+            except Exception:
                 st.info("Za mało danych do podziału typów.")
 
         with col2:
@@ -528,5 +593,5 @@ with tab5:
                     Zysk=('profit', 'sum')
                 ).reset_index()
                 st.dataframe(odds_summary, use_container_width=True)
-            except Exception as e:
+            except Exception:
                 st.info("Za mało danych do przedziałów kursów.")
